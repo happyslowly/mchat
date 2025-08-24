@@ -1,6 +1,6 @@
 # mchat
 
-A clean, fast terminal chat client for local LLMs with streaming responses and conversation history.
+A clean, fast terminal CLI chat client for local LLMs with streaming responses and conversation history.
 
 ## Features
 
