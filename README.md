@@ -2,6 +2,8 @@
 
 A clean, fast terminal CLI chat client for local LLMs with streaming responses and conversation history.
 
+![mchat demo](sample.png)
+
 ## Features
 
 - **Streaming responses** with thinking process display
