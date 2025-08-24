@@ -24,6 +24,8 @@ class Chat:
         self._hm = HistoryManager()
         self._console = Console()
         self._model_list = self._get_model_list()
+        self._last_summarized_index = -1
+        self._summary_task = None
         self._commands = {
             "quit": (self._quit, "Exit the chat application"),
             "help": (self._help, "Show available commands"),
@@ -32,9 +34,9 @@ class Chat:
             "model": (self._model, "Switch to specified model"),
             "clear_history": (self._clear_history, "Clear conversation history"),
             "show_history": (self._show_history, "Print conversation history"),
+            "history_limit": (self._history_limit, "Set max N messages to send"),
             "edit_mode": (self._edit_mode, "Switch between vi/emacs editing mode"),
         }
-        self._system_prompt = self._hm.history.system_prompt
 
         style = Style.from_dict(
             {
@@ -72,17 +74,24 @@ class Chat:
                     continue
 
             await self._chat_completion_stream(user_input)
+            self._create_summary_task()
+
+    def _build_message_context(self, prompt: str) -> list[Message]:
+        messages = []
+        system_prompt = self._hm.history.system_prompt or ""
+        if self._hm.history.summary:
+            system_prompt += (
+                f"\n\nPrevious conversation summary: {self._hm.history.summary}"
+            )
+        if system_prompt:
+            messages.append(Message(role="system", content=system_prompt))
+        # avoid blind-spot
+        messages.extend(self._hm.history.messages[self._last_summarized_index + 1 :])
+        messages.append(Message(role="user", content=prompt))
+        return messages
 
     async def _chat_completion_stream(self, prompt: str):
-        messages = []
-        if self._system_prompt:
-            messages.append(Message(role="system", content=self._system_prompt))
-            self._hm.update_system_prompt(self._system_prompt)
-        if self._hm.history.messages:
-            messages.extend(self._hm.history.messages)
-        current_message = Message(role="user", content=prompt)
-        messages.append(current_message)
-
+        messages = self._build_message_context(prompt)
         body = {
             "model": self._config.model,
             "messages": [m.model_dump() for m in messages],
@@ -122,7 +131,7 @@ class Chat:
                 )
             except Exception as e:
                 self._console.print(f"API error: {e}", style="red")
-        self._hm.add(current_message)
+        self._hm.add(Message(role="user", content=prompt))
         if content:
             self._hm.add(Message(role="assistant", content=content))
 
@@ -176,6 +185,12 @@ class Chat:
             return Config(
                 base_url=config["base_url"],
                 model=config["model"],
+                summary_model=config.get("summary_model", config["model"]),
+                history_limit=(
+                    config.get("max_history_turns") * 2  # pyright: ignore
+                    if config.get("max_history_turns")
+                    else -1
+                ),
                 api_key=config.get("api_key"),
             )
         except FileNotFoundError:
@@ -185,6 +200,8 @@ class Chat:
         await self._hm.save()
         if self._history_task:
             self._history_task.cancel()
+        if self._summary_task:
+            self._summary_task.cancel()
         exit(0)
 
     async def _help(self):
@@ -211,11 +228,11 @@ class Chat:
     async def _system(self, *args):
         if not args:
             self._console.print("System Prompt:", style="dim")
-            self._console.print(self._system_prompt, style="dim")
-        if len(args) == 1 and args[0] in ("''", '""'):
-            self._system_prompt = ""
+            self._console.print(self._hm.history.system_prompt, style="dim")
+        elif len(args) == 1 and args[0] in ("''", '""'):
+            self._hm.history.system_prompt = ""
         else:
-            self._system_prompt = " ".join(args)
+            self._hm.history.system_prompt = " ".join(args)
 
     async def _clear_history(self):
         self._hm.clear()
@@ -236,6 +253,70 @@ class Chat:
             self._session.editing_mode = EditingMode.EMACS
         else:
             self._console.print("Invalid mode. Use 'vi' or 'emacs'", style="red")
+
+    async def _history_limit(self, *args):
+        if not args:
+            return
+        try:
+            self._config.history_limit = int(args[0])
+        except Exception as e:
+            self._console.print(f"Cannot set history limit: {e}")
+
+    async def _summarize(self):
+        start = self._last_summarized_index + 1
+        current_messages = self._hm.history.messages.copy()
+        messages_to_summarize = (
+            current_messages[start:]
+            if self._config.history_limit == -1
+            else current_messages[start : -self._config.history_limit]
+        )
+        if not messages_to_summarize:
+            return
+        recent_history_text = "\n".join(
+            [f"{m.role}:{m.content}" for m in messages_to_summarize]
+        )
+        previous_summary = self._hm.history.summary
+        summary_prompt = f"""
+Summarize this conversation, incorporating the previous summary if provided.
+
+Previous summary: {previous_summary}
+
+Recent conversation:
+{recent_history_text}
+
+Create a concise summary (2-3 sentences) that:
+- Incorporates key points from the previous summary
+- Adds important new topics and conclusions
+- Maintains context needed for future messages
+
+Summary:
+"""
+        async with httpx.AsyncClient(timeout=60) as client:
+            try:
+                response = await client.post(
+                    self._config.base_url + "/chat/completions",
+                    json={
+                        "model": self._config.summary_model,
+                        "messages": [{"role": "user", "content": summary_prompt}],
+                    },
+                    headers=self._build_headers(),
+                )
+                data = response.json()
+                self._hm.history.summary = data["choices"][0]["message"]["content"]
+                self._last_summarized_index += len(messages_to_summarize)
+            except Exception as e:
+                self._console.print(
+                    f"Failed generate conversation summary: {e}", style="red"
+                )
+
+    def _create_summary_task(self):
+        if self._summary_task and self._summary_task.done():
+            if self._summary_task.exception():
+                self._console.print("Conversation summary failed", style="yellow")
+            self._summary_task = None
+
+        if not self._summary_task:
+            self._summary_task = asyncio.create_task(self._summarize())
 
     def _create_completer(self):
         class SmartCommandCompleter(Completer):

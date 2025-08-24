@@ -8,6 +8,8 @@ Role = Literal["user", "assistant", "system"]
 class Config(BaseModel):
     base_url: str
     model: str
+    summary_model: str
+    history_limit: int
     api_key: str | None = None
 
 
@@ -18,4 +20,5 @@ class Message(BaseModel):
 
 class History(BaseModel):
     system_prompt: str | None
+    summary: str
     messages: list[Message]

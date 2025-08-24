@@ -26,11 +26,13 @@ class HistoryManager:
             with open(history_path, "rb") as f:
                 doc = json.loads(f.read())
                 return History(
-                    system_prompt=doc["system_prompt"], messages=doc["messages"]
+                    system_prompt=doc["system_prompt"],
+                    messages=doc["messages"],
+                    summary=doc["summary"],
                 )
         except Exception as e:
             logger.warning(f"Failed to load history file", e)
-            return History(system_prompt="", messages=[])
+            return History(system_prompt="", messages=[], summary="")
 
     async def save(self):
         history_path = self._get_history_path()
@@ -45,4 +47,6 @@ class HistoryManager:
         self.history.system_prompt = system_prompt
 
     def clear(self):
-        self.history = History(system_prompt=self.history.system_prompt, messages=[])
+        self.history = History(
+            system_prompt=self.history.system_prompt, messages=[], summary=""
+        )
