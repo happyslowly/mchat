@@ -34,7 +34,7 @@ class Chat:
             "show_history": (self._show_history, "Print conversation history"),
             "edit_mode": (self._edit_mode, "Switch between vi/emacs editing mode"),
         }
-        self._system_prompt = ""
+        self._system_prompt = self._hm.history.system_prompt
 
         style = Style.from_dict(
             {

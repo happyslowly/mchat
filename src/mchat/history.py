@@ -30,7 +30,7 @@ class HistoryManager:
                 )
         except Exception as e:
             logger.warning(f"Failed to load history file", e)
-            return History(system_prompt=None, messages=[])
+            return History(system_prompt="", messages=[])
 
     async def save(self):
         history_path = self._get_history_path()
