@@ -7,7 +7,7 @@ A clean, fast terminal chat client for local LLMs with streaming responses and c
 - **Streaming responses** with thinking process display
 - **Conversation history** with persistence
 - **Rich terminal UI** with markdown rendering
-- **Vi/Emacs editing modes** via prompt-toolkit
+- **Vi/Emacs editing modes**
 - **Model switching** at runtime
 - **System prompt management**
 
@@ -23,6 +23,7 @@ Create `~/.config/mchat/config.toml`:
 
 ```toml
 base_url = "http://localhost:8000/v1"
+# default model
 model = "your-model-name"
 api_key = "optional-api-key"
 ```
