@@ -46,7 +46,6 @@ mchat
 - `/models` - List available models (\* = current)
 - `/model <name>` - Switch to specified model
 - `/system [prompt]` - View or set system prompt
-- `/history_limit <N>` - Set max conversation turns to send
 - `/show_history` - Print conversation history
 - `/clear_history` - Clear conversation history
 - `/edit_mode [vi|emacs]` - Switch editing mode

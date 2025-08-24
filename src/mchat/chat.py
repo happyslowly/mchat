@@ -31,10 +31,9 @@ class Chat:
             "help": (self._help, "Show available commands"),
             "system": (self._system, "View or set system prompt"),
             "models": (self._models, "List available models (* = current)"),
-            "model": (self._model, "Switch to specified model"),
+            "model": (self._switch_model, "Switch to specified model"),
             "clear_history": (self._clear_history, "Clear conversation history"),
             "show_history": (self._show_history, "Print conversation history"),
-            "history_limit": (self._history_limit, "Set max N messages to send"),
             "edit_mode": (self._edit_mode, "Switch between vi/emacs editing mode"),
         }
 
@@ -185,7 +184,7 @@ class Chat:
             return Config(
                 base_url=config["base_url"],
                 model=config["model"],
-                summary_model=config.get("summary_model", config["model"]),
+                summary_model=config.get("summary_model"),
                 history_limit=(
                     config.get("max_history_turns") * 2  # pyright: ignore
                     if config.get("max_history_turns")
@@ -219,7 +218,7 @@ class Chat:
             )
         self._console.print()
 
-    async def _model(self, model_name: str):
+    async def _switch_model(self, model_name: str):
         if model_name not in self._model_list:
             self._console.print(f"Model `{model_name}` not found!", style="red")
         else:
@@ -253,14 +252,6 @@ class Chat:
             self._session.editing_mode = EditingMode.EMACS
         else:
             self._console.print("Invalid mode. Use 'vi' or 'emacs'", style="red")
-
-    async def _history_limit(self, *args):
-        if not args:
-            return
-        try:
-            self._config.history_limit = int(args[0])
-        except Exception as e:
-            self._console.print(f"Cannot set history limit: {e}")
 
     async def _summarize(self):
         start = self._last_summarized_index + 1
@@ -296,7 +287,11 @@ Summary:
                 response = await client.post(
                     self._config.base_url + "/chat/completions",
                     json={
-                        "model": self._config.summary_model,
+                        "model": (
+                            self._config.summary_model
+                            if self._config.summary_model
+                            else self._config.model
+                        ),
                         "messages": [{"role": "user", "content": summary_prompt}],
                     },
                     headers=self._build_headers(),
