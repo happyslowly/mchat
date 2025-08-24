@@ -6,7 +6,9 @@ from pathlib import Path
 
 import httpx
 from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.enums import EditingMode
+from prompt_toolkit.styles import Style
 from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
@@ -33,7 +35,14 @@ class Chat:
             "edit_mode": (self._edit_mode, "Switch between vi/emacs editing mode"),
         }
         self._system_prompt = ""
-        self._session = PromptSession()
+
+        style = Style.from_dict(
+            {
+                "completion-menu.completion": "fg:default bg:default",
+                "completion-menu.completion.current": "bold",
+            }
+        )
+        self._session = PromptSession(completer=self._create_completer(), style=style)
 
     async def start(self):
         # save history every 5 minutes
@@ -227,6 +236,22 @@ class Chat:
             self._session.editing_mode = EditingMode.EMACS
         else:
             self._console.print("Invalid mode. Use 'vi' or 'emacs'", style="red")
+
+    def _create_completer(self):
+        class SmartCommandCompleter(Completer):
+            def __init__(self, commands):
+                self.commands = commands
+
+            def get_completions(self, document, complete_event):
+                _ = complete_event
+                text = document.text
+                if text.startswith("/") and " " not in text:
+                    word = text[1:]
+                    for cmd in self.commands:
+                        if cmd.startswith(word):
+                            yield Completion(cmd, start_position=-len(word))
+
+        return SmartCommandCompleter(list(self._commands.keys()))
 
     def _get_model_list(self) -> list[str]:
         with httpx.Client() as client:
