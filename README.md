@@ -14,7 +14,7 @@ A clean, fast terminal CLI chat client for local LLMs with streaming responses a
 ## Installation
 
 ```bash
-pip install -e .
+uv pip install -e .
 ```
 
 ## Configuration
