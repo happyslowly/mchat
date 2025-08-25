@@ -20,6 +20,7 @@ class ChatSession:
             self._system_prompt = ""
             self._summary = ""
             self._history: list[dict] = []
+        self._search = False
 
     @staticmethod
     def _get_session_path():
@@ -48,6 +49,14 @@ class ChatSession:
     @summary.setter
     def summary(self, value):
         self._summary = value
+
+    @property
+    def search(self):
+        return self._search
+
+    @search.setter
+    def search(self, value):
+        self._search = bool(value)
 
     async def save(self):
         session_path = self._get_session_path()

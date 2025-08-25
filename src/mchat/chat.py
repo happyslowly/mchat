@@ -16,6 +16,7 @@ from mchat.commands import (
 from mchat.config import config_manager
 from mchat.llm_client import LLMClient
 from mchat.session import ChatSession
+from mchat.web_search import WebSearchClient
 
 
 class Chat:
@@ -26,6 +27,7 @@ class Chat:
         self._console = Console()
         self._command_processor = CommandProcessor(self._console)
         self._prompt_session = self._get_prompt_session()
+        self._web_search_client = WebSearchClient()
 
         self._summary_task = None
         self._save_task = None
@@ -73,6 +75,11 @@ class Chat:
         return messages
 
     async def _chat_completion_stream(self, prompt: str):
+        original_prompt = prompt
+        if self._chat_session.search:
+            prompt_with_search = await self._web_search(prompt)
+            prompt = prompt_with_search if prompt_with_search else prompt
+
         messages = self._build_messages(prompt)
         content = ""
         with Live("", console=self._console) as live:
@@ -99,7 +106,7 @@ class Chat:
             except Exception as e:
                 self._console.print(str(e), style="red")
 
-        self._chat_session.add_to_history({"role": "user", "content": prompt})
+        self._chat_session.add_to_history({"role": "user", "content": original_prompt})
         if content:
             self._chat_session.add_to_history({"role": "assistant", "content": content})
 
@@ -142,6 +149,21 @@ Summary:
             self._console.print(
                 f"Failed generate conversation summary: {e}", style="red"
             )
+
+    async def _web_search(self, prompt: str) -> str | None:
+        query_gen_prompt = f"""
+Generate a web search query based on user's prompt.
+
+User's prompt: {prompt}
+"""
+        try:
+            query = await self._llm_client.completion(
+                self._config.model, [{"role": "user", "content": query_gen_prompt}]
+            )
+            search_result = await self._web_search_client.search(query)
+            return f"{prompt}\n\nContext from web search:{search_result}"
+        except Exception as e:
+            self._console.print(f"Web search failed: {e}", style="red")
 
     def _create_summary_task(self):
         if self._summary_task and self._summary_task.done():

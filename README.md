@@ -58,6 +58,6 @@ mchat
 
 ## TODO
 
-- [ ] Web search integration (Brave API)
+- [x] Web search integration (DuckDuckGo)
 - [ ] MCP (Model Context Protocol) support
 - [ ] Multiple conversation sessions

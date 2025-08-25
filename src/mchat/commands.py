@@ -103,6 +103,17 @@ async def show_history_command(console: Console, args: list[str]):
             console.print(f"{message['role']}:{message['content']}", style="dim")
 
 
+async def search_command(console: Console, args: list[str]):
+    _ = args
+    if _chat_session:
+        if _chat_session.search:
+            _chat_session.search = False
+            console.print("Search is turned off", style="dim")
+        else:
+            _chat_session.search = True
+            console.print("Search is turned on", style="dim")
+
+
 async def edit_mode_command(console: Console, args: list[str]):
     if not _prompt_session:
         return
@@ -130,6 +141,7 @@ def get_commands() -> dict[str, tuple[CommandHandler, str]]:
         "clear_history": (clear_history_command, "Clear conversation history"),
         "show_history": (show_history_command, "Print conversation history"),
         "edit_mode": (edit_mode_command, "Switch between vi/emacs editing mode"),
+        "search": (search_command, "Toggle internet search on and off"),
     }
 
 
