@@ -1,8 +1,13 @@
 import json
-from typing import AsyncIterator
+import traceback
+from typing import AsyncIterator, Literal
 
 import httpx
 from loguru import logger
+
+from mchat.tools import exec_tool_calls, get_tool_schemas
+
+EventType = Literal["thinking", "content", "tool_call", "tool_complete"]
 
 
 class LLMClient:
@@ -24,32 +29,65 @@ class LLMClient:
 
     async def stream_completion(
         self, model: str, messages: list[dict]
-    ) -> AsyncIterator[tuple[str, str]]:
+    ) -> AsyncIterator[tuple[EventType, str]]:
         body = {
             "model": model,
             "messages": messages,
             "stream": True,
+            "tools": get_tool_schemas(),
         }
 
         thinking_so_far = ""
         content_so_far = ""
         async with httpx.AsyncClient(timeout=self._timeout) as client:
-            try:
-                async with client.stream(
-                    "POST",
-                    self._base_url + "/chat/completions",
-                    json=body,
-                    headers=self._build_headers(),
-                ) as response:
-                    async for data in response.aiter_bytes():
-                        thinking_so_far, content_so_far = self._process_chunk(
-                            data, thinking_so_far, content_so_far
+            is_done = False
+            while True:
+                tool_calls = []
+                try:
+                    async with client.stream(
+                        "POST",
+                        self._base_url + "/chat/completions",
+                        json=body,
+                        headers=self._build_headers(),
+                    ) as response:
+                        response.raise_for_status()
+                        async for data in response.aiter_bytes():
+                            (
+                                tool_calls,
+                                thinking_so_far,
+                                content_so_far,
+                                is_done,
+                            ) = self._process_chunk(
+                                data,
+                                tool_calls,
+                                thinking_so_far,
+                                content_so_far,
+                            )
+                            if thinking_so_far:
+                                yield "thinking", thinking_so_far
+                            if content_so_far:
+                                yield "content", content_so_far
+                            if is_done:
+                                return
+
+                    if tool_calls:
+                        body["messages"].append(
+                            {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": tool_calls,
+                            }
                         )
-                        yield thinking_so_far, content_so_far
-            except httpx.TimeoutException as _:
-                raise TimeoutError("API call timed out")
-            except Exception as e:
-                raise RuntimeError(f"API error: {e}")
+                        for tool_call in tool_calls:
+                            yield "tool_call", json.dumps(tool_call)
+                        tool_messages = await exec_tool_calls(tool_calls)
+                        yield "tool_complete", f"{len(tool_calls)} tools executed"
+                        body["messages"].extend(tool_messages)
+                except httpx.TimeoutException as _:
+                    raise TimeoutError("API call timed out")
+                except Exception as e:
+                    traceback.print_exc()
+                    raise RuntimeError(f"API error: {e}")
 
     async def completion(self, model: str, messages: list[dict]) -> str:
         body = {
@@ -71,8 +109,8 @@ class LLMClient:
                 raise RuntimeError(f"API error: {e}")
 
     def _process_chunk(
-        self, data: bytes, thinking: str, content: str
-    ) -> tuple[str, str]:
+        self, data: bytes, tool_calls: list[dict], thinking: str, content: str
+    ) -> tuple[list[dict], str, str, bool]:
         for chunk in data.decode().split("\n"):
             if not chunk:
                 continue
@@ -92,16 +130,47 @@ class LLMClient:
             if not choices:
                 continue
             choice = choices[0]
+            finish_reason = choice["finish_reason"]
+            if finish_reason == "stop":
+                return tool_calls, thinking, content, True
+
             delta = choice["delta"]
             if not delta:
                 continue
+
+            tool_calls_delta = delta.get("tool_calls")
+            if tool_calls_delta:
+                for tool_calls_part in tool_calls_delta:
+                    index = tool_calls_part["index"]
+                    if index >= len(tool_calls):
+                        tool_calls.append(
+                            {
+                                "id": "",
+                                "type": "function",
+                                "function": {"name": "", "arguments": ""},
+                            }
+                        )
+                    current_tool = tool_calls[index]
+                    if tool_calls_part.get("id"):
+                        current_tool["id"] = tool_calls_part["id"]
+                    if tool_calls_part.get("function"):
+                        if tool_calls_part["function"].get("name"):
+                            current_tool["function"]["name"] = tool_calls_part[
+                                "function"
+                            ]["name"]
+                        if tool_calls_part["function"].get("arguments"):
+                            current_tool["function"]["arguments"] += tool_calls_part[
+                                "function"
+                            ]["arguments"]
+
             thinking_delta = delta.get("reasoning_content")
             if thinking_delta:
                 thinking += thinking_delta
             content_delta = delta.get("content")
             if content_delta:
                 content += content_delta
-        return thinking, content
+
+        return tool_calls, thinking, content, False
 
     def _build_headers(self):
         headers = {"Content-Type": "application/json"}

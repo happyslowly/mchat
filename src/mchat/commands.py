@@ -61,7 +61,6 @@ async def models_command(console: Console, args: list[str]):
     model_list = llm_client.list_models()
     for m in model_list:
         console.print(f"*{m}" if m == config.model else f" {m}", style="dim")
-        console.print()
 
 
 async def switch_model_command(console: Console, args: list[str]):
@@ -74,7 +73,7 @@ async def switch_model_command(console: Console, args: list[str]):
     if model_name not in model_list:
         console.print(f"Model `{model_name}` not found!", style="red")
     else:
-        config.model = model_name
+        config_manager.update(model=model_name)
 
 
 async def system_command(console: Console, args: list[str]):
@@ -97,7 +96,7 @@ async def clear_history_command(console: Console, args: list[str]):
 
 async def show_history_command(console: Console, args: list[str]):
     _ = args
-    if _chat_session:
+    if _chat_session and _chat_session.history:
         console.print("Conversation history:", style="dim")
         for message in _chat_session.history:
             console.print(f"{message['role']}:{message['content']}", style="dim")

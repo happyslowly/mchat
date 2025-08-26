@@ -1,14 +1,17 @@
 import asyncio
 
+from rich.console import Console
+
 from mchat.chat import Chat
 
 
 def main():
+    console = Console()
     try:
-        chat = Chat()
+        chat = Chat(console)
         asyncio.run(chat.start())
     except Exception as e:
-        print(f"{e}")
+        console.print(f"Error: {e}", style="red")
         exit(1)
 
 

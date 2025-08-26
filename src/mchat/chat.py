@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.styles import Style
@@ -6,6 +7,7 @@ from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.spinner import Spinner
 
 from mchat.commands import (
     CommandProcessor,
@@ -14,17 +16,17 @@ from mchat.commands import (
     set_chat_context,
 )
 from mchat.config import config_manager
-from mchat.llm_client import LLMClient
+from mchat.llm_client import EventType, LLMClient
 from mchat.session import ChatSession
-from mchat.web_search import WebSearchClient
+from mchat.tools import WebSearchClient
 
 
 class Chat:
-    def __init__(self):
+    def __init__(self, console: Console):
         self._config = config_manager.config
         self._llm_client = LLMClient(self._config.base_url, self._config.api_key)
         self._chat_session = ChatSession()
-        self._console = Console()
+        self._console = console
         self._command_processor = CommandProcessor(self._console)
         self._prompt_session = self._get_prompt_session()
         self._web_search_client = WebSearchClient()
@@ -46,7 +48,7 @@ class Chat:
         )
         while True:
             try:
-                user_input = await self._prompt_session.prompt_async("> ")
+                user_input = await self._prompt_session.prompt_async("❯ ")
             except (EOFError, KeyboardInterrupt):
                 await quit_command(self._console, [])
                 exit(0)
@@ -74,6 +76,66 @@ class Chat:
         messages.append({"role": "user", "content": prompt})
         return messages
 
+    def _process_stream_event(
+        self,
+        event_type: EventType,
+        data: str,
+        thinking_content: str,
+        content: str,
+        tool_content: str,
+    ) -> tuple[str, str, str]:
+        if event_type == "thinking":
+            thinking_content = data
+        elif event_type == "content":
+            content = data
+        elif event_type == "tool_call":
+            try:
+                tool_call = json.loads(data)
+                fn_name = tool_call["function"]["name"]
+                args = json.loads(tool_call["function"]["arguments"])
+                args_str = ", ".join(
+                    (
+                        f"{k}={repr(v)[:30]}..."
+                        if len(repr(v)) > 30
+                        else f"{k}={repr(v)}"
+                    )
+                    for k, v in args.items()
+                )
+                tool_content += f"🔧 {fn_name}({args_str})\n"
+            except (json.JSONDecodeError, KeyError):
+                tool_content += f"🔧 Tool call: {data}\n"
+        elif event_type == "tool_complete":
+            tool_content += f"✅ {data}"
+
+        return thinking_content, content, tool_content
+
+    def _build_display_panels(
+        self, tool_content: str, thinking_content: str, content: str
+    ) -> list:
+        """Build Rich panels for current streaming state"""
+        panels = []
+        if tool_content:
+            panels.append(
+                Panel(
+                    tool_content.strip(),
+                    title="🧰",
+                    title_align="right",
+                    style="dim",
+                )
+            )
+        if thinking_content:
+            panels.append(
+                Panel(
+                    thinking_content,
+                    title="🤔",
+                    title_align="right",
+                    style="dim italic",
+                )
+            )
+        if content:
+            panels.append(Panel(Markdown(content), title="📝", title_align="right"))
+        return panels
+
     async def _chat_completion_stream(self, prompt: str):
         original_prompt = prompt
         if self._chat_session.search:
@@ -81,28 +143,37 @@ class Chat:
             prompt = prompt_with_search if prompt_with_search else prompt
 
         messages = self._build_messages(prompt)
+
         content = ""
-        with Live("", console=self._console) as live:
+        thinking_content = ""
+        tool_content = ""
+
+        loading_spinner = Spinner("dots")
+        with Live(loading_spinner, console=self._console) as live:
             try:
-                async for (
-                    thinking_so_far,
-                    content_so_far,
-                ) in self._llm_client.stream_completion(self._config.model, messages):
-                    content_panel = Panel(
-                        Markdown(content_so_far), title="📝", title_align="right"
-                    )
-                    if thinking_so_far:
-                        thinking_panel = Panel(
-                            thinking_so_far,
-                            title="🤔",
-                            title_align="right",
-                            style="dim italic",
+                waiting = True
+                async for event_type, data in self._llm_client.stream_completion(
+                    self._config.model, messages
+                ):
+                    thinking_content, content, tool_content = (
+                        self._process_stream_event(
+                            event_type,
+                            data,
+                            thinking_content,
+                            content,
+                            tool_content,
                         )
-                        display = Group(thinking_panel, content_panel)
-                    else:
-                        display = content_panel
-                    live.update(display)
-                    content = content_so_far
+                    )
+
+                    panels = self._build_display_panels(
+                        tool_content, thinking_content, content
+                    )
+                    if panels:
+                        live.update(Group(*panels))
+                        waiting = False
+                    elif waiting:
+                        live.update(loading_spinner)
+
             except Exception as e:
                 self._console.print(str(e), style="red")
 
