@@ -8,6 +8,7 @@ A clean, fast terminal chat client for local LLMs with streaming responses, conv
 
 - **Streaming responses** with thinking process display
 - **Smart history management** with automatic summarization
+- **Tool calling support**
 - **Rich terminal UI** with markdown rendering
 - **Auto completion** for commands
 - **Vi/Emacs editing modes** via prompt-toolkit
@@ -46,8 +47,7 @@ mchat
 - `/models` - List available models (\* = current)
 - `/model <name>` - Switch to specified model
 - `/system [prompt]` - View or set system prompt
-- `/show_history` - Print conversation history
-- `/clear_history` - Clear conversation history
+- `/history [clear|dump]` - View, clear or dump conversation history
 - `/edit_mode [vi|emacs]` - Switch editing mode
 - `/quit` - Exit (or Ctrl+C/Ctrl+D)
 
