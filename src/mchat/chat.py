@@ -48,7 +48,7 @@ class Chat:
         )
         while True:
             try:
-                user_input = await self._prompt_session.prompt_async("❯ ")
+                user_input = await self._prompt_session.prompt_async("▶ ")
             except (EOFError, KeyboardInterrupt):
                 await quit_command(self._console, [])
                 exit(0)
