@@ -1,4 +1,5 @@
 import asyncio
+import json
 from typing import Awaitable, Callable
 
 from prompt_toolkit import PromptSession
@@ -80,37 +81,42 @@ async def system_command(console: Console, args: list[str]):
     if not _chat_session:
         return
     if not args:
-        console.print("System Prompt:", style="dim")
-        console.print(_chat_session.system_prompt, style="dim")
-    elif len(args) == 1 and args[0] in ("''", '""'):
+        if _chat_session.system_prompt:
+            console.print(_chat_session.system_prompt, style="dim")
+        else:
+            console.print("No System prompt", style="yellow dim")
+    elif len(args) == 1 and args[0].lower() == "clear":
         _chat_session.system_prompt = ""
     else:
         _chat_session.system_prompt = " ".join(args)
 
 
-async def clear_history_command(console: Console, args: list[str]):
-    _ = console, args
-    if _chat_session:
-        _chat_session.clear()
-
-
-async def show_history_command(console: Console, args: list[str]):
+async def history_command(console: Console, args: list[str]):
     _ = args
-    if _chat_session and _chat_session.history:
-        console.print("Conversation history:", style="dim")
-        for message in _chat_session.history:
-            console.print(f"{message['role']}:{message['content']}", style="dim")
+    if not _chat_session:
+        return
 
-
-async def search_command(console: Console, args: list[str]):
-    _ = args
-    if _chat_session:
-        if _chat_session.search:
-            _chat_session.search = False
-            console.print("Search is turned off", style="dim")
+    if args:
+        if args[0].lower() == "clear":
+            _chat_session.history.clear()
+        elif args[0].lower() == "dump":
+            if not _chat_session.history:
+                console.print("No history", style="yellow dim")
+            else:
+                with open("history.jsonl", "w") as f:
+                    for message in _chat_session.history:
+                        f.write(json.dumps(message))
+                        f.write("\n")
+                console.print("History dumped to history.jsonl", style="green dim")
         else:
-            _chat_session.search = True
-            console.print("Search is turned on", style="dim")
+            console.print("Usage: /history \\[clear|dump]", style="dim")
+    else:
+        if _chat_session.history:
+            console.print("Current Conversation:", style="dim")
+            for message in _chat_session.history:
+                console.print(f"{message['role']}:{message['content']}", style="dim")
+        else:
+            console.print("No history", style="yellow dim")
 
 
 async def edit_mode_command(console: Console, args: list[str]):
@@ -118,7 +124,7 @@ async def edit_mode_command(console: Console, args: list[str]):
         return
     if not args:
         current = "vi" if _prompt_session.editing_mode == EditingMode.VI else "emacs"
-        console.print(f"Current editing mode: {current}", style="dim")
+        console.print(f"Editing mode: {current}", style="dim")
         return
     mode = args[0]
     if mode.lower() == "vi":
@@ -126,21 +132,18 @@ async def edit_mode_command(console: Console, args: list[str]):
     elif mode.lower() == "emacs":
         _prompt_session.editing_mode = EditingMode.EMACS
     else:
-        console.print("Invalid mode. Use 'vi' or 'emacs'", style="red")
+        console.print("Usage: /edit_mode \\[vi|emacs]", style="dim")
 
 
 def get_commands() -> dict[str, tuple[CommandHandler, str]]:
-
     return {
         "quit": (quit_command, "Exit the chat application"),
         "help": (help_command, "Show available commands"),
         "system": (system_command, "View or set system prompt"),
         "models": (models_command, "List available models (* = current)"),
         "model": (switch_model_command, "Switch to specified model"),
-        "clear_history": (clear_history_command, "Clear conversation history"),
-        "show_history": (show_history_command, "Print conversation history"),
+        "history": (history_command, "View, clear, or dump conversation history"),
         "edit_mode": (edit_mode_command, "Switch between vi/emacs editing mode"),
-        "search": (search_command, "Toggle internet search on and off"),
     }
 
 
