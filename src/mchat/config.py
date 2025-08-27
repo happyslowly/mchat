@@ -8,10 +8,12 @@ from pydantic import BaseModel
 
 class Config(BaseModel):
     base_url: str
+    api_key: str | None = None
     model: str
     summary_model: str | None = None
-    history_limit: int
-    api_key: str | None = None
+    max_history_turns: int = -1
+    timeout: int = -1
+    save_interval: int = 300
 
 
 class ConfigManager:
@@ -50,14 +52,12 @@ class ConfigManager:
                 config = tomllib.load(f)
             return Config(
                 base_url=config["base_url"],
+                api_key=config.get("api_key"),
                 model=config["model"],
                 summary_model=config.get("summary_model"),
-                history_limit=(
-                    config.get("max_history_turns") * 2  # pyright: ignore
-                    if config.get("max_history_turns")
-                    else -1
-                ),
-                api_key=config.get("api_key"),
+                max_history_turns=config.get("max_history_turns", -1),
+                timeout=config.get("timeout", -1),
+                save_interval=config.get("save_interval", 300),
             )
         except FileNotFoundError:
             raise FileNotFoundError(f"Config file not found: {config_file}")

@@ -58,10 +58,15 @@ async def help_command(console: Console, args: list[str]):
 async def models_command(console: Console, args: list[str]):
     _ = args
     config = config_manager.config
-    llm_client = LLMClient(config.base_url, config.api_key)
+    llm_client = LLMClient(
+        config.base_url, api_key=config.api_key, timeout=config.timeout
+    )
     model_list = llm_client.list_models()
     for m in model_list:
-        console.print(f"*{m}" if m == config.model else f" {m}", style="dim")
+        console.print(
+            f"*{m}" if _chat_session and m == _chat_session._model else f" {m}",
+            style="dim",
+        )
 
 
 async def switch_model_command(console: Console, args: list[str]):
@@ -69,12 +74,14 @@ async def switch_model_command(console: Console, args: list[str]):
         return
     model_name = args[0]
     config = config_manager.config
-    llm_client = LLMClient(config.base_url, config.api_key)
+    llm_client = LLMClient(
+        config.base_url, api_key=config.api_key, timeout=config.timeout
+    )
     model_list = llm_client.list_models()
     if model_name not in model_list:
         console.print(f"Model `{model_name}` not found!", style="red")
-    else:
-        config_manager.update(model=model_name)
+    elif _chat_session:
+        _chat_session._model = model_name
 
 
 async def system_command(console: Console, args: list[str]):

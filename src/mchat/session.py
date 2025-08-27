@@ -5,6 +5,8 @@ from pathlib import Path
 import aiofiles
 from loguru import logger
 
+from mchat.config import config_manager
+
 
 class ChatSession:
     def __init__(self):
@@ -20,7 +22,7 @@ class ChatSession:
             self._system_prompt = ""
             self._summary = ""
             self._history: list[dict] = []
-        self._search = False
+        self._model = config_manager.config.model
 
     @staticmethod
     def _get_session_path():

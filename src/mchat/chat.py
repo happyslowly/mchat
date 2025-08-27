@@ -18,27 +18,28 @@ from mchat.commands import (
 from mchat.config import config_manager
 from mchat.llm_client import EventType, LLMClient
 from mchat.session import ChatSession
-from mchat.tools import WebSearchClient
 
 
 class Chat:
     def __init__(self, console: Console):
         self._config = config_manager.config
-        self._llm_client = LLMClient(self._config.base_url, self._config.api_key)
+        self._llm_client = LLMClient(
+            self._config.base_url,
+            api_key=self._config.api_key,
+            timeout=self._config.timeout,
+        )
         self._chat_session = ChatSession()
         self._console = console
         self._command_processor = CommandProcessor(self._console)
         self._prompt_session = self._get_prompt_session()
-        self._web_search_client = WebSearchClient()
 
         self._summary_task = None
         self._save_task = None
         self._last_summarized_index = -1
 
     async def start(self):
-        # save history every 5 minutes
         self._save_task = asyncio.create_task(
-            _set_interval(self._chat_session.save, 60 * 5)
+            _set_interval(self._chat_session.save, self._config.save_interval)
         )
         set_chat_context(
             self._chat_session,
@@ -112,7 +113,6 @@ class Chat:
     def _build_display_panels(
         self, tool_content: str, thinking_content: str, content: str
     ) -> list:
-        """Build Rich panels for current streaming state"""
         panels = []
         if tool_content:
             panels.append(
@@ -137,11 +137,6 @@ class Chat:
         return panels
 
     async def _chat_completion_stream(self, prompt: str):
-        original_prompt = prompt
-        if self._chat_session.search:
-            prompt_with_search = await self._web_search(prompt)
-            prompt = prompt_with_search if prompt_with_search else prompt
-
         messages = self._build_messages(prompt)
 
         content = ""
@@ -177,7 +172,7 @@ class Chat:
             except Exception as e:
                 self._console.print(str(e), style="red")
 
-        self._chat_session.add_to_history({"role": "user", "content": original_prompt})
+        self._chat_session.add_to_history({"role": "user", "content": prompt})
         if content:
             self._chat_session.add_to_history({"role": "assistant", "content": content})
 
@@ -186,8 +181,8 @@ class Chat:
         current_messages = self._chat_session.history.copy()
         messages_to_summarize = (
             current_messages[start:]
-            if self._config.history_limit == -1
-            else current_messages[start : -self._config.history_limit]
+            if self._config.max_history_turns == -1
+            else current_messages[start : -self._config.max_history_turns * 2]
         )
         if not messages_to_summarize:
             return
@@ -203,7 +198,7 @@ Previous summary: {previous_summary}
 Recent conversation:
 {recent_history_text}
 
-Create a concise summary (2-3 sentences) that:
+Create a concise summary that:
 - Incorporates key points from the previous summary
 - Adds important new topics and conclusions
 - Maintains context needed for future messages
@@ -220,21 +215,6 @@ Summary:
             self._console.print(
                 f"Failed generate conversation summary: {e}", style="red"
             )
-
-    async def _web_search(self, prompt: str) -> str | None:
-        query_gen_prompt = f"""
-Generate a web search query based on user's prompt.
-
-User's prompt: {prompt}
-"""
-        try:
-            query = await self._llm_client.completion(
-                self._config.model, [{"role": "user", "content": query_gen_prompt}]
-            )
-            search_result = await self._web_search_client.search(query)
-            return f"{prompt}\n\nContext from web search:{search_result}"
-        except Exception as e:
-            self._console.print(f"Web search failed: {e}", style="red")
 
     def _create_summary_task(self):
         if self._summary_task and self._summary_task.done():

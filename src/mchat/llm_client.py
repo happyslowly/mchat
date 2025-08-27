@@ -11,10 +11,10 @@ EventType = Literal["thinking", "content", "tool_call", "tool_complete"]
 
 
 class LLMClient:
-    def __init__(self, base_url: str, api_key: str | None = None, timeout=60):
+    def __init__(self, base_url: str, timeout: int, api_key: str | None = None):
         self._base_url = base_url
         self._api_key = api_key
-        self._timeout = timeout
+        self._timeout = timeout if timeout > 0 else None
 
     def list_models(self) -> list[str]:
         with httpx.Client(timeout=self._timeout) as client:
