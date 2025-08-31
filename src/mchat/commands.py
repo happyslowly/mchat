@@ -130,6 +130,15 @@ async def history_command(*args) -> Text | str | None:
             return Text("\n").join(lines)
 
 
+async def clear_command(*args):
+    _ = args
+    if not _chat_session:
+        return
+    _chat_session.history.clear()
+    _chat_session.summary = ""
+    _chat_session.system_prompt = ""
+
+
 async def edit_mode_command(*args) -> str | None:
     if not _prompt_session:
         return
@@ -151,6 +160,7 @@ def get_commands() -> dict[str, tuple[CommandHandler, str]]:
         "models": (models_command, "List available models"),
         "model": (switch_model_command, "Switch to specified model"),
         "history": (history_command, "View, clear, or dump conversation history"),
+        "clear": (clear_command, "Clear current chat session"),
         "edit_mode": (edit_mode_command, "Switch between vi/emacs editing mode"),
     }
 

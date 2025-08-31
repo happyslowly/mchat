@@ -107,7 +107,7 @@ class Chat:
             except (json.JSONDecodeError, KeyError):
                 tool_content += f"🔧 Tool call: {data}\n"
         elif event_type == "tool_complete":
-            tool_content += f"✅ {data}"
+            tool_content += f"✅ {data}\n"
 
         return thinking_content, content, tool_content
 
@@ -149,7 +149,7 @@ class Chat:
             try:
                 waiting = True
                 async for event_type, data in self._llm_client.stream_completion(
-                    self._config.model, messages
+                    self._chat_session._model, messages
                 ):
                     thinking_content, content, tool_content = (
                         self._process_stream_event(

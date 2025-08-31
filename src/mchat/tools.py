@@ -24,7 +24,12 @@ async def duckduckgo_search(query: str, max_results: int = 5) -> str:
         results = await asyncio.to_thread(
             lambda q, m: list(ddgs.text(q, max_results=m)), query, max_results
         )
-        return "\n".join([f"{r['title']}:{r['body']}" for r in results])
+        return "\n".join(
+            [
+                f"Title: {r['title']}\nURL: {r['href']}\nSnippet: {r['body']}...\n---"
+                for r in results
+            ]
+        )
 
 
 async def extract_web_page(url: str) -> str:
@@ -41,9 +46,11 @@ async def extract_web_page(url: str) -> str:
         try:
             response = await client.get(url)
             soup = BeautifulSoup(response.content, "html.parser")
-            for script in soup(["script", "style"]):
+            for script in soup(["script", "style", "nav", "header", "footer", "aside"]):
                 script.decompose()
-            return soup.get_text()
+            text = soup.get_text()
+            lines = [line.strip() for line in text.splitlines()]
+            return "\n".join(line for line in lines if line)
         except Exception as e:
             raise RuntimeError(f"Failed to fetch from `{url}`: {e}")
 
