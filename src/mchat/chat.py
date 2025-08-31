@@ -8,6 +8,7 @@ from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.spinner import Spinner
+from rich.text import Text
 
 from mchat.commands import (
     CommandProcessor,
@@ -49,17 +50,17 @@ class Chat:
         )
         while True:
             try:
-                user_input = await self._prompt_session.prompt_async("▶ ")
+                user_input = await self._prompt_session.prompt_async("» ")
             except (EOFError, KeyboardInterrupt):
-                await quit_command(self._console, [])
+                await quit_command()
                 exit(0)
 
             user_input = user_input.strip()
             if not user_input:
                 continue
             if user_input.startswith("/"):
-                if await self._command_processor.execute(user_input):
-                    continue
+                await self._command_processor.execute(user_input)
+                continue
 
             await self._chat_completion_stream(user_input)
             self._create_summary_task()
@@ -170,7 +171,7 @@ class Chat:
                         live.update(loading_spinner)
 
             except Exception as e:
-                self._console.print(str(e), style="red")
+                live.update(Text(text=str(e), style="red"))
 
         self._chat_session.add_to_history({"role": "user", "content": prompt})
         if content:
@@ -212,14 +213,17 @@ Summary:
             )
             self._last_summarized_index += len(messages_to_summarize)
         except Exception as e:
-            self._console.print(
-                f"Failed generate conversation summary: {e}", style="red"
-            )
+            raise RuntimeError(f"Failed to create conversation summary: {e}")
 
     def _create_summary_task(self):
         if self._summary_task and self._summary_task.done():
-            if self._summary_task.exception():
-                self._console.print("Conversation summary failed", style="yellow")
+            e = self._summary_task.exception()
+            if e:
+                self._console.print(
+                    Panel.fit(
+                        str(e), border_style="red", title="📝", title_align="right"
+                    )
+                )
             self._summary_task = None
 
         if not self._summary_task:

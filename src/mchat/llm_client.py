@@ -1,5 +1,4 @@
 import json
-import traceback
 from typing import AsyncIterator, Literal
 
 import httpx
@@ -81,12 +80,11 @@ class LLMClient:
                         for tool_call in tool_calls:
                             yield "tool_call", json.dumps(tool_call)
                         tool_messages = await exec_tool_calls(tool_calls)
-                        yield "tool_complete", f"{len(tool_calls)} tools executed"
+                        yield "tool_complete", f"{len(tool_calls)} tool(s) executed"
                         body["messages"].extend(tool_messages)
                 except httpx.TimeoutException as _:
                     raise TimeoutError("API call timed out")
                 except Exception as e:
-                    traceback.print_exc()
                     raise RuntimeError(f"API error: {e}")
 
     async def completion(self, model: str, messages: list[dict]) -> str:

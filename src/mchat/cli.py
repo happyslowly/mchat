@@ -1,6 +1,7 @@
 import asyncio
 
 from rich.console import Console
+from rich.panel import Panel
 
 from mchat.chat import Chat
 
@@ -11,7 +12,7 @@ def main():
         chat = Chat(console)
         asyncio.run(chat.start())
     except Exception as e:
-        console.print(f"Error: {e}", style="red")
+        console.print(Panel.fit(str(e), border_style="red"))
         exit(1)
 
 

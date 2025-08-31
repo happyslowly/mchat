@@ -6,12 +6,14 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.enums import EditingMode
 from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
 
 from mchat.config import config_manager
 from mchat.llm_client import LLMClient
 from mchat.session import ChatSession
 
-CommandHandler = Callable[[Console, list[str]], Awaitable[None]]
+CommandHandler = Callable[..., Awaitable[str | Text | None]]
 
 _save_task = None
 _summary_task = None
@@ -33,8 +35,8 @@ def set_chat_context(
     _summary_task = summary_task
 
 
-async def quit_command(console: Console, args: list[str]):
-    _ = console, args
+async def quit_command(*args) -> None:
+    _ = args
     if _chat_session:
         await _chat_session.save()
     if _save_task and not _save_task.done():
@@ -44,32 +46,34 @@ async def quit_command(console: Console, args: list[str]):
     exit(0)
 
 
-async def help_command(console: Console, args: list[str]):
+async def help_command(*args) -> str:
     _ = args
-    console.print("Available Commands:", style="dim")
     commands = get_commands()
     max_width = max(len(cmd) for cmd in commands) + 1
+    lines = []
     for cmd in commands:
         cmd_text = f"/{cmd}".ljust(max_width + 2)
-        console.print(f"  {cmd_text} {commands[cmd][1]}", style="dim")
-    console.print()
+        lines.append(f"{cmd_text} {commands[cmd][1]}")
+    return "\n".join(lines)
 
 
-async def models_command(console: Console, args: list[str]):
+async def models_command(*args) -> Text:
     _ = args
     config = config_manager.config
     llm_client = LLMClient(
         config.base_url, api_key=config.api_key, timeout=config.timeout
     )
     model_list = llm_client.list_models()
+    lines = []
     for m in model_list:
-        console.print(
-            f"*{m}" if _chat_session and m == _chat_session._model else f" {m}",
-            style="dim",
-        )
+        if _chat_session and m == _chat_session._model:
+            lines.append(Text(m, style="green"))
+        else:
+            lines.append(Text(m))
+    return Text("\n").join(lines)
 
 
-async def switch_model_command(console: Console, args: list[str]):
+async def switch_model_command(*args):
     if not args:
         return
     model_name = args[0]
@@ -79,26 +83,24 @@ async def switch_model_command(console: Console, args: list[str]):
     )
     model_list = llm_client.list_models()
     if model_name not in model_list:
-        console.print(f"Model `{model_name}` not found!", style="red")
+        raise ValueError(f"Model `{model_name}` not found.")
     elif _chat_session:
         _chat_session._model = model_name
 
 
-async def system_command(console: Console, args: list[str]):
+async def system_command(*args) -> str | None:
     if not _chat_session:
         return
     if not args:
         if _chat_session.system_prompt:
-            console.print(_chat_session.system_prompt, style="dim")
-        else:
-            console.print("No System prompt", style="yellow dim")
+            return _chat_session.system_prompt
     elif len(args) == 1 and args[0].lower() == "clear":
         _chat_session.system_prompt = ""
     else:
         _chat_session.system_prompt = " ".join(args)
 
 
-async def history_command(console: Console, args: list[str]):
+async def history_command(*args) -> Text | str | None:
     _ = args
     if not _chat_session:
         return
@@ -106,40 +108,39 @@ async def history_command(console: Console, args: list[str]):
     if args:
         if args[0].lower() == "clear":
             _chat_session.history.clear()
+            _chat_session.summary = ""
         elif args[0].lower() == "dump":
-            if not _chat_session.history:
-                console.print("No history", style="yellow dim")
-            else:
+            if _chat_session.history:
                 with open("history.jsonl", "w") as f:
                     for message in _chat_session.history:
                         f.write(json.dumps(message))
                         f.write("\n")
-                console.print("History dumped to history.jsonl", style="green dim")
-        else:
-            console.print("Usage: /history \\[clear|dump]", style="dim")
+                return "History dumped to history.jsonl"
     else:
         if _chat_session.history:
-            console.print("Current Conversation:", style="dim")
+            lines = []
             for message in _chat_session.history:
-                console.print(f"{message['role']}:{message['content']}", style="dim")
-        else:
-            console.print("No history", style="yellow dim")
+                role = "You" if message["role"] == "user" else "AI"
+                content = message["content"]
+                lines.append(
+                    Text(f"{role}: ", style="magenta").append(
+                        Text(content, style="default")
+                    )
+                )
+            return Text("\n").join(lines)
 
 
-async def edit_mode_command(console: Console, args: list[str]):
+async def edit_mode_command(*args) -> str | None:
     if not _prompt_session:
         return
     if not args:
         current = "vi" if _prompt_session.editing_mode == EditingMode.VI else "emacs"
-        console.print(f"Editing mode: {current}", style="dim")
-        return
+        return f"{current}"
     mode = args[0]
     if mode.lower() == "vi":
         _prompt_session.editing_mode = EditingMode.VI
     elif mode.lower() == "emacs":
         _prompt_session.editing_mode = EditingMode.EMACS
-    else:
-        console.print("Usage: /edit_mode \\[vi|emacs]", style="dim")
 
 
 def get_commands() -> dict[str, tuple[CommandHandler, str]]:
@@ -147,7 +148,7 @@ def get_commands() -> dict[str, tuple[CommandHandler, str]]:
         "quit": (quit_command, "Exit the chat application"),
         "help": (help_command, "Show available commands"),
         "system": (system_command, "View or set system prompt"),
-        "models": (models_command, "List available models (* = current)"),
+        "models": (models_command, "List available models"),
         "model": (switch_model_command, "Switch to specified model"),
         "history": (history_command, "View, clear, or dump conversation history"),
         "edit_mode": (edit_mode_command, "Switch between vi/emacs editing mode"),
@@ -159,10 +160,7 @@ class CommandProcessor:
         self._console = console
         self._commands = get_commands()
 
-    async def execute(self, command_line: str) -> bool:
-        if not command_line.startswith("/"):
-            return False
-
+    async def execute(self, command_line: str):
         parts = command_line[1:].split()
         cmd_name = parts[0]
         args = parts[1:] if len(parts) > 1 else []
@@ -170,13 +168,35 @@ class CommandProcessor:
         if cmd_name in self._commands:
             handler, _ = self._commands[cmd_name]
             try:
-                await handler(self._console, args)
-            except Exception as e:
-                self._console.print(f"Command {cmd_name} failed: {e}", style="red")
-            return True
+                output = await handler(*args)
+                if output:
+                    self._console.print(
+                        Panel.fit(
+                            output,
+                            title="⚡",
+                            title_align="right",
+                        )
+                    )
 
-        self._console.print(f"Unknown command: /{cmd_name}", style="red")
-        return True
+            except Exception as e:
+                self._console.print(
+                    Panel.fit(
+                        str(e),
+                        border_style="red",
+                        title="⚡",
+                        title_align="right",
+                    )
+                )
+            return
+
+        self._console.print(
+            Panel.fit(
+                f"Unknown command: /{cmd_name}",
+                border_style="red",
+                title="⚡",
+                title_align="right",
+            )
+        )
 
 
 class SmartCommandCompleter(Completer):
