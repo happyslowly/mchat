@@ -1,4 +1,5 @@
 import json
+from dataclasses import dataclass, field
 from typing import AsyncIterator, Literal
 
 import httpx
@@ -6,7 +7,22 @@ from loguru import logger
 
 from mchat.tools import exec_tool_calls, get_tool_schemas
 
-EventType = Literal["thinking", "content", "tool_call", "tool_complete"]
+EventType = Literal["thinking", "content", "tool_call", "tool_complete", "error"]
+
+
+@dataclass
+class ChunkResult:
+    thinking: str = ""
+    content: str = ""
+    error: str = ""
+    tool_calls: list[dict] = field(default_factory=list)
+    is_done: bool = False
+
+
+@dataclass
+class StreamEvent:
+    type: EventType
+    data: str
 
 
 class LLMClient:
@@ -28,7 +44,7 @@ class LLMClient:
 
     async def stream_completion(
         self, model: str, messages: list[dict]
-    ) -> AsyncIterator[tuple[EventType, str]]:
+    ) -> AsyncIterator[StreamEvent]:
         body = {
             "model": model,
             "messages": messages,
@@ -36,12 +52,8 @@ class LLMClient:
             "tools": get_tool_schemas(),
         }
 
-        thinking_so_far = ""
-        content_so_far = ""
         async with httpx.AsyncClient(timeout=self._timeout) as client:
-            is_done = False
             while True:
-                tool_calls = []
                 try:
                     async with client.stream(
                         "POST",
@@ -49,38 +61,41 @@ class LLMClient:
                         json=body,
                         headers=self._build_headers(),
                     ) as response:
+                        tool_calls = []
                         response.raise_for_status()
                         async for data in response.aiter_bytes():
-                            (
-                                tool_calls,
-                                thinking_so_far,
-                                content_so_far,
-                                is_done,
-                            ) = self._process_chunk(
+                            result = self._process_chunk(
                                 data,
-                                tool_calls,
-                                thinking_so_far,
-                                content_so_far,
                             )
-                            if thinking_so_far:
-                                yield "thinking", thinking_so_far
-                            if content_so_far:
-                                yield "content", content_so_far
-                            if is_done:
+                            if result.is_done:
+                                return
+                            if result.error:
+                                yield StreamEvent("error", result.error)
                                 return
 
-                    if tool_calls:
+                            if result.thinking:
+                                yield StreamEvent("thinking", result.thinking)
+                            if result.content:
+                                yield StreamEvent("content", result.content)
+                            if result.tool_calls:
+                                tool_calls.extend(result.tool_calls)
+
+                    tool_calls_complete = self._merge_tool_calls(tool_calls)
+                    if tool_calls_complete:
                         body["messages"].append(
                             {
                                 "role": "assistant",
                                 "content": None,
-                                "tool_calls": tool_calls,
+                                "tool_calls": tool_calls_complete,
                             }
                         )
-                        for tool_call in tool_calls:
-                            yield "tool_call", json.dumps(tool_call)
-                        tool_messages = await exec_tool_calls(tool_calls)
-                        yield "tool_complete", f"{len(tool_calls)} tool(s) executed"
+                        for tool_call in tool_calls_complete:
+                            yield StreamEvent("tool_call", json.dumps(tool_call))
+                        tool_messages = await exec_tool_calls(tool_calls_complete)
+                        yield StreamEvent(
+                            "tool_complete",
+                            f"{len(tool_calls_complete)} tool(s) executed",
+                        )
                         body["messages"].extend(tool_messages)
                 except httpx.TimeoutException as _:
                     raise TimeoutError("API call timed out")
@@ -107,11 +122,24 @@ class LLMClient:
                 raise RuntimeError(f"API error: {e}")
 
     def _process_chunk(
-        self, data: bytes, tool_calls: list[dict], thinking: str, content: str
-    ) -> tuple[list[dict], str, str, bool]:
+        self,
+        data: bytes,
+    ) -> ChunkResult:
+        result = ChunkResult()
+
         for chunk in data.decode().split("\n"):
             if not chunk:
                 continue
+            # special handing the error chunk due to llama.cpp bug
+            if chunk.startswith("error: "):
+                chunk_data = chunk[7:]
+                try:
+                    error = json.loads(chunk[7:])["message"]
+                except Exception as _:
+                    error = chunk
+                result.error += error
+                return result
+
             if not chunk.startswith("data: "):
                 continue
 
@@ -130,7 +158,8 @@ class LLMClient:
             choice = choices[0]
             finish_reason = choice["finish_reason"]
             if finish_reason == "stop":
-                return tool_calls, thinking, content, True
+                result.is_done = True
+                return result
 
             delta = choice["delta"]
             if not delta:
@@ -139,36 +168,32 @@ class LLMClient:
             tool_calls_delta = delta.get("tool_calls")
             if tool_calls_delta:
                 for tool_calls_part in tool_calls_delta:
-                    index = tool_calls_part["index"]
-                    if index >= len(tool_calls):
-                        tool_calls.append(
-                            {
-                                "id": "",
-                                "type": "function",
-                                "function": {"name": "", "arguments": ""},
-                            }
-                        )
-                    current_tool = tool_calls[index]
-                    if tool_calls_part.get("id"):
-                        current_tool["id"] = tool_calls_part["id"]
-                    if tool_calls_part.get("function"):
-                        if tool_calls_part["function"].get("name"):
-                            current_tool["function"]["name"] = tool_calls_part[
-                                "function"
-                            ]["name"]
-                        if tool_calls_part["function"].get("arguments"):
-                            current_tool["function"]["arguments"] += tool_calls_part[
-                                "function"
-                            ]["arguments"]
+                    result.tool_calls.append(tool_calls_part)
 
             thinking_delta = delta.get("reasoning_content")
             if thinking_delta:
-                thinking += thinking_delta
+                result.thinking += thinking_delta
             content_delta = delta.get("content")
             if content_delta:
-                content += content_delta
+                result.content += content_delta
 
-        return tool_calls, thinking, content, False
+        return result
+
+    def _merge_tool_calls(self, tool_calls: list[dict]) -> list[dict]:
+        merged = []
+        for tool_call in tool_calls:
+            id = tool_call.get("id")
+            if id:
+                merged.append(tool_call)
+            else:
+                if tool_call.get("function"):
+                    if tool_call["function"].get("name"):
+                        merged[-1]["function"]["name"] += tool_call["function"]["name"]
+                    if tool_call["function"].get("arguments"):
+                        merged[-1]["function"]["arguments"] += tool_call["function"][
+                            "arguments"
+                        ]
+        return merged
 
     def _build_headers(self):
         headers = {"Content-Type": "application/json"}

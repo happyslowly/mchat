@@ -17,7 +17,7 @@ from mchat.commands import (
     set_chat_context,
 )
 from mchat.config import config_manager
-from mchat.llm_client import EventType, LLMClient
+from mchat.llm_client import LLMClient
 from mchat.session import ChatSession
 
 
@@ -78,91 +78,81 @@ class Chat:
         messages.append({"role": "user", "content": prompt})
         return messages
 
-    def _process_stream_event(
-        self,
-        event_type: EventType,
-        data: str,
-        thinking_content: str,
-        content: str,
-        tool_content: str,
-    ) -> tuple[str, str, str]:
-        if event_type == "thinking":
-            thinking_content = data
-        elif event_type == "content":
-            content = data
-        elif event_type == "tool_call":
-            try:
-                tool_call = json.loads(data)
-                fn_name = tool_call["function"]["name"]
-                args = json.loads(tool_call["function"]["arguments"])
-                args_str = ", ".join(
-                    (
-                        f"{k}={repr(v)[:30]}..."
-                        if len(repr(v)) > 30
-                        else f"{k}={repr(v)}"
-                    )
-                    for k, v in args.items()
-                )
-                tool_content += f"🔧 {fn_name}({args_str})\n"
-            except (json.JSONDecodeError, KeyError):
-                tool_content += f"🔧 Tool call: {data}\n"
-        elif event_type == "tool_complete":
-            tool_content += f"✅ {data}\n"
+    def _format_tool_call_data(self, data: str) -> str:
+        tool_call = json.loads(data)
+        fn_name = tool_call["function"]["name"]
+        args = json.loads(tool_call["function"]["arguments"])
+        args_str = ", ".join(
+            (f"{k}={repr(v)[:30]}..." if len(repr(v)) > 30 else f"{k}={repr(v)}")
+            for k, v in args.items()
+        )
+        return f"🔧 {fn_name}({args_str})"
 
-        return thinking_content, content, tool_content
+    def _format_tool_complete_data(self, data: str) -> str:
+        return f"✅ {data}"
 
     def _build_display_panels(
-        self, tool_content: str, thinking_content: str, content: str
+        self,
+        tool_contents: list[str],
+        thinking_contents: list[str],
+        contents: list[str],
     ) -> list:
         panels = []
-        if tool_content:
+        if tool_contents:
             panels.append(
                 Panel(
-                    tool_content.strip(),
+                    "\n".join(tool_contents),
                     title="🧰",
                     title_align="right",
                     style="dim",
                 )
             )
-        if thinking_content:
+        if thinking_contents:
             panels.append(
                 Panel(
-                    thinking_content,
+                    "".join(thinking_contents),
                     title="🤔",
                     title_align="right",
                     style="dim italic",
                 )
             )
-        if content:
-            panels.append(Panel(Markdown(content), title="📝", title_align="right"))
+        if contents:
+            panels.append(
+                Panel(Markdown("".join(contents)), title="📝", title_align="right")
+            )
         return panels
 
     async def _chat_completion_stream(self, prompt: str):
         messages = self._build_messages(prompt)
 
-        content = ""
-        thinking_content = ""
-        tool_content = ""
-
+        tool_contents = []
+        thinking_contents = []
+        contents = []
         loading_spinner = Spinner("dots")
+
         with Live(loading_spinner, console=self._console) as live:
             try:
                 waiting = True
-                async for event_type, data in self._llm_client.stream_completion(
+                async for event in self._llm_client.stream_completion(
                     self._chat_session._model, messages
                 ):
-                    thinking_content, content, tool_content = (
-                        self._process_stream_event(
-                            event_type,
-                            data,
-                            thinking_content,
-                            content,
-                            tool_content,
+
+                    if event.type == "error":
+                        raise RuntimeError(event.data)
+
+                    if event.type == "thinking":
+                        thinking_contents.append(event.data)
+                    elif event.type == "content":
+                        contents.append(event.data)
+                    elif event.type == "tool_call":
+                        tool_contents.append(self._format_tool_call_data(event.data))
+                    elif event.type == "tool_complete":
+                        tool_contents.append(
+                            self._format_tool_complete_data(event.data)
                         )
-                    )
 
                     panels = self._build_display_panels(
-                        tool_content, thinking_content, content
+                        tool_contents, thinking_contents, contents
                     )
                     if panels:
                         live.update(Group(*panels))
@@ -174,8 +164,10 @@ class Chat:
                 live.update(Text(text=str(e), style="red"))
 
         self._chat_session.add_to_history({"role": "user", "content": prompt})
-        if content:
-            self._chat_session.add_to_history({"role": "assistant", "content": content})
+        if contents:
+            self._chat_session.add_to_history(
+                {"role": "assistant", "content": "".join(contents)}
+            )
 
     async def _summarize(self):
         start = self._last_summarized_index + 1
