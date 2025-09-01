@@ -5,11 +5,9 @@ from pathlib import Path
 import aiofiles
 from loguru import logger
 
-from mchat.config import config_manager
-
 
 class ChatSession:
-    def __init__(self):
+    def __init__(self, model: str):
         session_path = self._get_session_path()
         try:
             with open(session_path, "rb") as f:
@@ -19,12 +17,12 @@ class ChatSession:
                 self._summary = doc["summary"]
                 self._last_summarized_index = doc.get("last_summarized_index", -1)
         except Exception as e:
-            logger.warning(f"Failed to load chat session file", e)
+            logger.warning("Failed to load chat session file: {}", e)
             self._system_prompt = ""
             self._summary = ""
             self._history: list[dict] = []
             self._last_summarized_index = -1
-        self._model = config_manager.config.model
+        self._model = model
 
     @staticmethod
     def _get_session_path():

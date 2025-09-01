@@ -33,7 +33,9 @@ class LLMClient:
 
     def list_models(self) -> list[str]:
         with httpx.Client(timeout=self._timeout) as client:
-            response = client.get(self._base_url + "/models")
+            response = client.get(
+                self._base_url + "/models", headers=self._build_headers()
+            )
             response.raise_for_status()
             data = response.json()["data"]
             models = []
@@ -63,15 +65,14 @@ class LLMClient:
                     ) as response:
                         tool_calls = []
                         response.raise_for_status()
-                        async for data in response.aiter_bytes():
-                            result = self._process_chunk(
-                                data,
-                            )
-                            if result.is_done:
-                                return
+                        finished = False
+                        async for line in response.aiter_lines():
+                            result = self._process_chunk(line)
+
                             if result.error:
                                 yield StreamEvent("error", result.error)
-                                return
+                                finished = True
+                                break
 
                             if result.thinking:
                                 yield StreamEvent("thinking", result.thinking)
@@ -79,6 +80,10 @@ class LLMClient:
                                 yield StreamEvent("content", result.content)
                             if result.tool_calls:
                                 tool_calls.extend(result.tool_calls)
+                            if result.is_done:
+                                finished = True
+                                # continue processing post-stream work
+                                break
 
                     tool_calls_complete = self._merge_tool_calls(tool_calls)
                     if tool_calls_complete:
@@ -97,6 +102,10 @@ class LLMClient:
                             f"{len(tool_calls_complete)} tool(s) executed",
                         )
                         body["messages"].extend(tool_messages)
+
+                    # If no tool calls to execute, and stream is finished, exit
+                    if finished and not tool_calls_complete:
+                        return
                 except httpx.TimeoutException as _:
                     raise TimeoutError("API call timed out")
                 except Exception as e:
@@ -123,59 +132,58 @@ class LLMClient:
 
     def _process_chunk(
         self,
-        data: bytes,
+        line: str,
     ) -> ChunkResult:
         result = ChunkResult()
 
-        for chunk in data.decode().split("\n"):
-            if not chunk:
-                continue
-            # special handing the error chunk due to llama.cpp bug
-            if chunk.startswith("error: "):
-                chunk_data = chunk[7:]
-                try:
-                    error = json.loads(chunk[7:])["message"]
-                except Exception as _:
-                    error = chunk
-                result.error += error
-                return result
+        if not line:
+            return result
 
-            if not chunk.startswith("data: "):
-                continue
-
-            chunk = chunk[6:]
-            if chunk == "[DONE]":
-                break
-
+        if line.startswith("error: "):
             try:
-                chunk_data = json.loads(chunk)
-            except json.JSONDecodeError as _:
-                logger.error(f"Failed to parse chunk: `{chunk}`")
-                continue
-            choices = chunk_data["choices"]
-            if not choices:
-                continue
-            choice = choices[0]
-            finish_reason = choice["finish_reason"]
-            if finish_reason == "stop":
-                result.is_done = True
-                return result
+                error = json.loads(line[7:])["message"]
+            except Exception as _:
+                error = line
+            result.error += error
+            return result
 
-            delta = choice["delta"]
-            if not delta:
-                continue
+        if not line.startswith("data: "):
+            return result
 
-            tool_calls_delta = delta.get("tool_calls")
-            if tool_calls_delta:
-                for tool_calls_part in tool_calls_delta:
-                    result.tool_calls.append(tool_calls_part)
+        payload = line[6:]
+        if payload == "[DONE]":
+            result.is_done = True
+            return result
 
-            thinking_delta = delta.get("reasoning_content")
-            if thinking_delta:
-                result.thinking += thinking_delta
-            content_delta = delta.get("content")
-            if content_delta:
-                result.content += content_delta
+        try:
+            chunk_data = json.loads(payload)
+        except json.JSONDecodeError as _:
+            logger.error(f"Failed to parse chunk: `{payload}`")
+            return result
+
+        choices = chunk_data.get("choices", [])
+        if not choices:
+            return result
+        choice = choices[0]
+        finish_reason = choice.get("finish_reason")
+        if finish_reason == "stop":
+            result.is_done = True
+
+        delta = choice.get("delta")
+        if not delta:
+            return result
+
+        tool_calls_delta = delta.get("tool_calls")
+        if tool_calls_delta:
+            for tool_calls_part in tool_calls_delta:
+                result.tool_calls.append(tool_calls_part)
+
+        thinking_delta = delta.get("reasoning_content")
+        if thinking_delta:
+            result.thinking += thinking_delta
+        content_delta = delta.get("content")
+        if content_delta:
+            result.content += content_delta
 
         return result
 

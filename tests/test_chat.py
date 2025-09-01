@@ -3,9 +3,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
+from rich.console import Console
 
 from mchat.chat import Chat
-from mchat.config import Config, ConfigManager
+from mchat.config import Config
 from mchat.llm_client import LLMClient
 from mchat.session import ChatSession
 
@@ -15,30 +16,28 @@ class TestChatMessageBuilding:
 
     @pytest.fixture
     def mock_chat(self):
-        with patch("mchat.config.ConfigManager._load_config") as mock_config:
-            mock_config.return_value = Config(
-                base_url="http://test",
-                model="test-model",
-                summary_model="test-model",
-                history_limit=4,
-                api_key=None,
-            )
-            with patch(
-                "mchat.llm_client.LLMClient.list_models", return_value=["test-model"]
-            ):
-                chat = Chat()
+        cfg = Config(
+            base_url="http://test",
+            model="test-model",
+            summary_model="test-model",
+            max_history_turns=4,
+            api_key=None,
+            timeout=-1,
+            save_interval=300,
+        )
+        chat = Chat(Console(), config=cfg)
 
-                # Mock chat session with history
-                chat._chat_session._system_prompt = "You are helpful"
-                chat._chat_session._summary = "Previous chat about coding"
-                chat._chat_session._history = [
-                    {"role": "user", "content": "Hello"},
-                    {"role": "assistant", "content": "Hi there"},
-                    {"role": "user", "content": "How are you?"},
-                    {"role": "assistant", "content": "I'm good"},
-                ]
-                chat._last_summarized_index = 1  # Summarized first 2 messages
-                return chat
+        # Mock chat session with history
+        chat._chat_session._system_prompt = "You are helpful"
+        chat._chat_session._summary = "Previous chat about coding"
+        chat._chat_session._history = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there"},
+            {"role": "user", "content": "How are you?"},
+            {"role": "assistant", "content": "I'm good"},
+        ]
+        chat._chat_session.last_summarized_index = 1  # Summarized first 2 messages
+        return chat
 
     def test_build_messages_with_system_and_summary(self, mock_chat):
         """Test message building includes system prompt + summary + unsummarized history"""
@@ -83,7 +82,7 @@ class TestChatMessageBuilding:
     def test_build_messages_no_history(self, mock_chat):
         """Test with empty conversation history"""
         mock_chat._chat_session._history = []
-        mock_chat._last_summarized_index = -1
+        mock_chat._chat_session.last_summarized_index = -1
 
         messages = mock_chat._build_messages("First message")
 
@@ -97,65 +96,66 @@ class TestLLMClientProcessing:
 
     @pytest.fixture
     def llm_client(self):
-        return LLMClient("http://test", None)
+        return LLMClient("http://test", 0)
 
     def test_process_chunk_single_chunk(self, llm_client):
         """Test processing a single SSE chunk"""
-        chunk_data = json.dumps(
-            {
-                "choices": [
-                    {"delta": {"content": "Hello", "reasoning_content": "Thinking..."}}
-                ]
-            }
-        )
-        sse_data = f"data: {chunk_data}\n".encode()
+        payload = {
+            "choices": [
+                {
+                    "delta": {"content": "Hello", "reasoning_content": "Thinking..."},
+                    "finish_reason": None,
+                }
+            ]
+        }
+        line = f"data: {json.dumps(payload)}"
 
-        thinking, content = llm_client._process_chunk(sse_data, "", "")
+        result = llm_client._process_chunk(line)
 
-        assert thinking == "Thinking..."
-        assert content == "Hello"
+        assert result.thinking == "Thinking..."
+        assert result.content == "Hello"
 
     def test_process_chunk_multiple_chunks(self, llm_client):
         """Test accumulating multiple chunks"""
-        chunk1 = json.dumps({"choices": [{"delta": {"content": "Hello"}}]})
-        chunk2 = json.dumps({"choices": [{"delta": {"content": " world"}}]})
+        payload1 = {"choices": [{"delta": {"content": "Hello"}, "finish_reason": None}]}
+        payload2 = {
+            "choices": [{"delta": {"content": " world"}, "finish_reason": None}]
+        }
 
-        data1 = f"data: {chunk1}\n".encode()
-        data2 = f"data: {chunk2}\n".encode()
+        r1 = llm_client._process_chunk(f"data: {json.dumps(payload1)}")
+        assert r1.content == "Hello"
 
-        thinking, content = llm_client._process_chunk(data1, "", "")
-        assert content == "Hello"
-
-        thinking, content = llm_client._process_chunk(data2, thinking, content)
-        assert content == "Hello world"
+        r2 = llm_client._process_chunk(f"data: {json.dumps(payload2)}")
+        assert r2.content == " world"
 
     def test_process_chunk_done_signal(self, llm_client):
         """Test DONE signal stops processing"""
-        data = "data: [DONE]\ndata: should_be_ignored\n".encode()
+        line = "data: [DONE]"
 
-        thinking, content = llm_client._process_chunk(data, "", "")
+        result = llm_client._process_chunk(line)
 
-        assert thinking == ""
-        assert content == ""
+        assert result.thinking == ""
+        assert result.content == ""
+        assert result.is_done is True
 
     def test_process_chunk_invalid_json(self, llm_client):
         """Test handling of malformed JSON chunks"""
-        data = "data: {invalid json}\n".encode()
+        line = "data: {invalid json}"
 
         # Should not raise exception, just log error
-        thinking, content = llm_client._process_chunk(data, "", "")
-        assert thinking == ""
-        assert content == ""
+        result = llm_client._process_chunk(line)
+        assert result.thinking == ""
+        assert result.content == ""
 
     def test_process_chunk_empty_choices(self, llm_client):
         """Test handling chunks with no choices"""
         chunk = json.dumps({"choices": []})
-        data = f"data: {chunk}\n".encode()
+        line = f"data: {chunk}"
 
-        thinking, content = llm_client._process_chunk(data, "", "")
+        result = llm_client._process_chunk(line)
 
-        assert thinking == ""
-        assert content == ""
+        assert result.thinking == ""
+        assert result.content == ""
 
 
 class TestLLMClientHeaders:
@@ -163,7 +163,7 @@ class TestLLMClientHeaders:
 
     def test_build_headers_no_api_key(self):
         """Test headers without API key"""
-        client = LLMClient("http://test", None)
+        client = LLMClient("http://test", 0)
 
         headers = client._build_headers()
 
@@ -171,7 +171,7 @@ class TestLLMClientHeaders:
 
     def test_build_headers_with_api_key(self):
         """Test headers with API key"""
-        client = LLMClient("http://test", "sk-test123")
+        client = LLMClient("http://test", 0, "sk-test123")
 
         headers = client._build_headers()
 
@@ -182,34 +182,22 @@ class TestLLMClientHeaders:
         assert headers == expected
 
 
-class TestConfigManager:
-    """Test configuration loading and management"""
+class TestConfig:
+    """Test configuration model"""
 
-    def test_config_singleton(self):
-        """Test ConfigManager is a proper singleton"""
-        from mchat.config import config_manager
-
-        manager1 = ConfigManager()
-        manager2 = ConfigManager()
-
-        assert manager1 is manager2
-        assert manager1 is config_manager
-
-    def test_config_update(self):
-        """Test runtime config updates"""
-        with patch("mchat.config.ConfigManager._load_config") as mock_load:
-            mock_load.return_value = Config(
-                base_url="http://test", model="test-model", history_limit=-1
-            )
-
-            manager = ConfigManager()
-            original_model = manager.config.model
-
-            # Update config
-            manager.update(model="new-model")
-
-            assert manager.config.model == "new-model"
-            assert manager.config.model != original_model
+    def test_config_creation_and_update(self):
+        cfg = Config(
+            base_url="http://test",
+            model="test-model",
+            max_history_turns=-1,
+        )
+        assert cfg.base_url == "http://test"
+        assert cfg.model == "test-model"
+        # Update
+        original_model = cfg.model
+        cfg.model = "new-model"
+        assert cfg.model == "new-model"
+        assert cfg.model != original_model
 
 
 class TestChatSession:
@@ -267,31 +255,29 @@ class TestSummarization:
     @pytest_asyncio.fixture
     async def mock_chat_with_history(self):
         """Create chat with realistic conversation history"""
-        with patch("mchat.config.ConfigManager._load_config") as mock_config:
-            mock_config.return_value = Config(
-                base_url="http://test",
-                model="test",
-                summary_model="summary-model",
-                history_limit=4,
-                api_key=None,
-            )
-            with patch("mchat.llm_client.LLMClient.list_models", return_value=["test"]):
-                chat = Chat()
+        cfg = Config(
+            base_url="http://test",
+            model="test",
+            summary_model="summary-model",
+            max_history_turns=2,  # keep last 2 turns (4 messages)
+            api_key=None,
+        )
+        chat = Chat(Console(), config=cfg)
 
-                # Setup history with 6 messages, limit=4 (keep last 4)
-                chat._chat_session._system_prompt = ""
-                chat._chat_session._summary = "Old summary"
-                chat._chat_session._history = [
-                    {"role": "user", "content": "Msg 1"},  # Index 0
-                    {"role": "assistant", "content": "Reply 1"},  # Index 1
-                    {"role": "user", "content": "Msg 2"},  # Index 2
-                    {"role": "assistant", "content": "Reply 2"},  # Index 3
-                    {"role": "user", "content": "Msg 3"},  # Index 4
-                    {"role": "assistant", "content": "Reply 3"},  # Index 5
-                ]
-                chat._last_summarized_index = -1  # Nothing summarized yet
+        # Setup history with 6 messages, limit=4 (keep last 4)
+        chat._chat_session._system_prompt = ""
+        chat._chat_session._summary = "Old summary"
+        chat._chat_session._history = [
+            {"role": "user", "content": "Msg 1"},  # Index 0
+            {"role": "assistant", "content": "Reply 1"},  # Index 1
+            {"role": "user", "content": "Msg 2"},  # Index 2
+            {"role": "assistant", "content": "Reply 2"},  # Index 3
+            {"role": "user", "content": "Msg 3"},  # Index 4
+            {"role": "assistant", "content": "Reply 3"},  # Index 5
+        ]
+        chat._chat_session.last_summarized_index = -1  # Nothing summarized yet
 
-                return chat
+        return chat
 
     @pytest.mark.asyncio
     async def test_summarize_with_history_limit(self, mock_chat_with_history):
@@ -307,7 +293,7 @@ class TestSummarization:
             await chat._summarize()
 
             # Should summarize messages 0-1 (first 2), keeping last 4 messages
-            assert chat._last_summarized_index == 1
+            assert chat._chat_session.last_summarized_index == 1
             assert chat._chat_session.summary == "New summary of messages 1-2"
 
             # Verify API call was made
@@ -329,7 +315,7 @@ class TestSummarization:
     async def test_summarize_no_messages_to_process(self, mock_chat_with_history):
         """Test summarization when no new messages to summarize"""
         chat = mock_chat_with_history
-        chat._last_summarized_index = 5  # Already summarized everything
+        chat._chat_session.last_summarized_index = 5  # Already summarized everything
 
         original_summary = chat._chat_session.summary
 
@@ -346,4 +332,3 @@ class TestSummarization:
 if __name__ == "__main__":
     # Run with: python -m pytest tests/test_chat_updated.py -v
     pass
-

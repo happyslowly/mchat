@@ -16,20 +16,20 @@ from mchat.commands import (
     quit_command,
     set_chat_context,
 )
-from mchat.config import config_manager
+from mchat.config import Config, load_config
 from mchat.llm_client import LLMClient
 from mchat.session import ChatSession
 
 
 class Chat:
-    def __init__(self, console: Console):
-        self._config = config_manager.config
+    def __init__(self, console: Console, config: Config | None = None):
+        self._config = config or load_config()
         self._llm_client = LLMClient(
             self._config.base_url,
             api_key=self._config.api_key,
             timeout=self._config.timeout,
         )
-        self._chat_session = ChatSession()
+        self._chat_session = ChatSession(model=self._config.model)
         self._console = console
         self._command_processor = CommandProcessor(self._console)
         self._prompt_session = self._get_prompt_session()
@@ -46,6 +46,7 @@ class Chat:
             self._prompt_session,
             self._save_task,
             self._summary_task,
+            self._config,
         )
         while True:
             try:

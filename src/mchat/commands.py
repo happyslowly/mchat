@@ -12,7 +12,7 @@ from rich.panel import Panel
 from rich.spinner import Spinner
 from rich.text import Text
 
-from mchat.config import config_manager
+from mchat.config import Config
 from mchat.llm_client import LLMClient
 from mchat.session import ChatSession
 
@@ -22,6 +22,7 @@ _save_task = None
 _summary_task = None
 _chat_session = None
 _prompt_session = None
+_config: Config | None = None
 
 
 def set_chat_context(
@@ -29,13 +30,15 @@ def set_chat_context(
     prompt_session: PromptSession,
     save_task: asyncio.Task | None,
     summary_task: asyncio.Task | None,
+    config: Config,
 ):
-    global _chat_session, _save_task, _summary_task, _prompt_session
+    global _chat_session, _save_task, _summary_task, _prompt_session, _config
     _chat_session = chat_session
 
     _prompt_session = prompt_session
     _save_task = save_task
     _summary_task = summary_task
+    _config = config
 
 
 async def quit_command(*args) -> None:
@@ -62,9 +65,10 @@ async def help_command(*args) -> str:
 
 async def models_command(*args) -> Text:
     _ = args
-    config = config_manager.config
+    if not _config:
+        raise ValueError("Configuration is not available")
     llm_client = LLMClient(
-        config.base_url, api_key=config.api_key, timeout=config.timeout
+        _config.base_url, api_key=_config.api_key, timeout=_config.timeout
     )
     model_list = llm_client.list_models()
     lines = []
@@ -80,9 +84,10 @@ async def switch_model_command(*args):
     if not args:
         return
     model_name = args[0]
-    config = config_manager.config
+    if not _config:
+        raise ValueError("Configuration is not available")
     llm_client = LLMClient(
-        config.base_url, api_key=config.api_key, timeout=config.timeout
+        _config.base_url, api_key=_config.api_key, timeout=_config.timeout
     )
     model_list = llm_client.list_models()
     if model_name not in model_list:
@@ -162,10 +167,11 @@ async def summary_command(*args) -> str:
     if not _chat_session.history:
         raise ValueError("No conversation history to summarize")
 
-    config = config_manager.config
-    llm_client = LLMClient(config.base_url, timeout=60, api_key=config.api_key)
+    if not _config:
+        raise ValueError("Configuration is not available")
+    llm_client = LLMClient(_config.base_url, timeout=60, api_key=_config.api_key)
     await _chat_session.create_summary(
-        llm_client, config, end_index=len(_chat_session.history)
+        llm_client, _config, end_index=len(_chat_session.history)
     )
     return _chat_session.summary
 
