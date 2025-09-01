@@ -6,14 +6,17 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.enums import EditingMode
 from rich.console import Console
+from rich.live import Live
+from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.spinner import Spinner
 from rich.text import Text
 
 from mchat.config import config_manager
 from mchat.llm_client import LLMClient
 from mchat.session import ChatSession
 
-CommandHandler = Callable[..., Awaitable[str | Text | None]]
+CommandHandler = Callable[..., Awaitable[str | Text | Markdown | None]]
 
 _save_task = None
 _summary_task = None
@@ -88,68 +91,83 @@ async def switch_model_command(*args):
         _chat_session._model = model_name
 
 
-async def system_command(*args) -> str | None:
+async def system_command(*args) -> str:
     if not _chat_session:
-        return
-    if not args:
-        if _chat_session.system_prompt:
-            return _chat_session.system_prompt
+        raise ValueError("Chat session is not available")
     elif len(args) == 1 and args[0].lower() == "clear":
         _chat_session.system_prompt = ""
     else:
         _chat_session.system_prompt = " ".join(args)
+    return _chat_session.system_prompt
 
 
-async def history_command(*args) -> Text | str | None:
+async def history_command(*args) -> str | Markdown:
     _ = args
     if not _chat_session:
-        return
+        raise ValueError("Chat session is not available")
 
     if args:
         if args[0].lower() == "clear":
             _chat_session.history.clear()
             _chat_session.summary = ""
-        elif args[0].lower() == "dump":
+            return "Conversation history cleared"
+        if args[0].lower() == "dump":
             if _chat_session.history:
                 with open("history.jsonl", "w") as f:
                     for message in _chat_session.history:
                         f.write(json.dumps(message))
                         f.write("\n")
-                return "History dumped to history.jsonl"
+                return "Conversation history dumped to history.jsonl"
+            raise ValueError("No conversation history to dump")
+        raise ValueError("Usage: /history [clear|dump]")
     else:
         if _chat_session.history:
             lines = []
             for message in _chat_session.history:
-                role = "You" if message["role"] == "user" else "AI"
                 content = message["content"]
-                lines.append(
-                    Text(f"{role}: ", style="magenta").append(
-                        Text(content, style="default")
-                    )
-                )
-            return Text("\n").join(lines)
+                if message["role"] == "user":
+                    lines.append(f"***You***: *{content}*  ")
+                else:
+                    lines.append(f"**AI**: {content}  ")
+            lines.append("")
+            return Markdown("\n".join(lines))
+        raise ValueError("No conversation history")
 
 
 async def clear_command(*args):
     _ = args
     if not _chat_session:
         return
-    _chat_session.history.clear()
-    _chat_session.summary = ""
-    _chat_session.system_prompt = ""
+    _chat_session.clear()
 
 
-async def edit_mode_command(*args) -> str | None:
+async def edit_mode_command(*args) -> str:
     if not _prompt_session:
-        return
-    if not args:
-        current = "vi" if _prompt_session.editing_mode == EditingMode.VI else "emacs"
-        return f"{current}"
-    mode = args[0]
-    if mode.lower() == "vi":
-        _prompt_session.editing_mode = EditingMode.VI
-    elif mode.lower() == "emacs":
-        _prompt_session.editing_mode = EditingMode.EMACS
+        raise ValueError("Prompt session is not available")
+    if args:
+        mode = args[0]
+        if mode.lower() == "vi":
+            _prompt_session.editing_mode = EditingMode.VI
+        elif mode.lower() == "emacs":
+            _prompt_session.editing_mode = EditingMode.EMACS
+    return "vi" if _prompt_session.editing_mode == EditingMode.VI else "emacs"
+
+
+async def summary_command(*args) -> str:
+    _ = args
+
+    if not _chat_session:
+        raise ValueError("Chat session is not available")
+
+    if not _chat_session.history:
+        raise ValueError("No conversation history to summarize")
+
+    config = config_manager.config
+    llm_client = LLMClient(config.base_url, timeout=60, api_key=config.api_key)
+    await _chat_session.create_summary(
+        llm_client, config, end_index=len(_chat_session.history)
+    )
+    return _chat_session.summary
 
 
 def get_commands() -> dict[str, tuple[CommandHandler, str]]:
@@ -160,6 +178,7 @@ def get_commands() -> dict[str, tuple[CommandHandler, str]]:
         "models": (models_command, "List available models"),
         "model": (switch_model_command, "Switch to specified model"),
         "history": (history_command, "View, clear, or dump conversation history"),
+        "summary": (summary_command, "Create summary of entire conversation history"),
         "clear": (clear_command, "Clear current chat session"),
         "edit_mode": (edit_mode_command, "Switch between vi/emacs editing mode"),
     }
@@ -175,37 +194,32 @@ class CommandProcessor:
         cmd_name = parts[0]
         args = parts[1:] if len(parts) > 1 else []
 
-        if cmd_name in self._commands:
+        if cmd_name not in self._commands:
+            self._console.print(
+                self._create_panel(f"Unknown command: /{cmd_name}", error=True)
+            )
+            return
+
+        output, error = None, None
+        with Live(Spinner("dots"), transient=True) as _:
             handler, _ = self._commands[cmd_name]
             try:
                 output = await handler(*args)
-                if output:
-                    self._console.print(
-                        Panel.fit(
-                            output,
-                            title="⚡",
-                            title_align="right",
-                        )
-                    )
-
             except Exception as e:
-                self._console.print(
-                    Panel.fit(
-                        str(e),
-                        border_style="red",
-                        title="⚡",
-                        title_align="right",
-                    )
-                )
-            return
+                error = str(e)
+        if output:
+            self._console.print(self._create_panel(output))
+        if error:
+            self._console.print(self._create_panel(error, error=True))
 
-        self._console.print(
-            Panel.fit(
-                f"Unknown command: /{cmd_name}",
-                border_style="red",
-                title="⚡",
-                title_align="right",
-            )
+    def _create_panel(
+        self, content: str | Text | Markdown, error: bool = False
+    ) -> Panel:
+        return Panel.fit(
+            content,
+            title="⚡",
+            title_align="right",
+            border_style="red" if error else "default",
         )
 
 

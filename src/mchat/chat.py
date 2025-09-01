@@ -36,7 +36,6 @@ class Chat:
 
         self._summary_task = None
         self._save_task = None
-        self._last_summarized_index = -1
 
     async def start(self):
         self._save_task = asyncio.create_task(
@@ -74,7 +73,9 @@ class Chat:
             )
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-        messages.extend(self._chat_session.history[self._last_summarized_index + 1 :])
+        messages.extend(
+            self._chat_session.history[self._chat_session.last_summarized_index + 1 :]
+        )
         messages.append({"role": "user", "content": prompt})
         return messages
 
@@ -170,42 +171,7 @@ class Chat:
             )
 
     async def _summarize(self):
-        start = self._last_summarized_index + 1
-        current_messages = self._chat_session.history.copy()
-        messages_to_summarize = (
-            current_messages[start:]
-            if self._config.max_history_turns == -1
-            else current_messages[start : -self._config.max_history_turns * 2]
-        )
-        if not messages_to_summarize:
-            return
-        recent_history_text = "\n".join(
-            [f"{m['role']}:{m['content']}" for m in messages_to_summarize]
-        )
-        previous_summary = self._chat_session.summary
-        summary_prompt = f"""
-Summarize this conversation, incorporating the previous summary if provided.
-
-Previous summary: {previous_summary}
-
-Recent conversation:
-{recent_history_text}
-
-Create a concise summary that:
-- Incorporates key points from the previous summary
-- Adds important new topics and conclusions
-- Maintains context needed for future messages
-
-Summary:
-"""
-        try:
-            summary_model = self._config.summary_model or self._config.model
-            self._chat_session.summary = await self._llm_client.completion(
-                summary_model, [{"role": "user", "content": summary_prompt}]
-            )
-            self._last_summarized_index += len(messages_to_summarize)
-        except Exception as e:
-            raise RuntimeError(f"Failed to create conversation summary: {e}")
+        await self._chat_session.create_summary(self._llm_client, self._config)
 
     def _create_summary_task(self):
         if self._summary_task and self._summary_task.done():
