@@ -214,7 +214,7 @@ class TestChatSession:
                     "summary": "Test summary",
                 },
             ):
-                return ChatSession()
+                return ChatSession("new-model")
 
     def test_session_properties(self, mock_session):
         """Test session property access"""

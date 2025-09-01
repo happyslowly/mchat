@@ -109,7 +109,7 @@ class LLMClient:
                 except httpx.TimeoutException as _:
                     raise TimeoutError("API call timed out")
                 except Exception as e:
-                    raise RuntimeError(f"API error: {e}")
+                    raise RuntimeError(f"Error: {e}")
 
     async def completion(self, model: str, messages: list[dict]) -> str:
         body = {
@@ -190,17 +190,25 @@ class LLMClient:
     def _merge_tool_calls(self, tool_calls: list[dict]) -> list[dict]:
         merged = []
         for tool_call in tool_calls:
-            id = tool_call.get("id")
-            if id:
-                merged.append(tool_call)
-            else:
-                if tool_call.get("function"):
-                    if tool_call["function"].get("name"):
-                        merged[-1]["function"]["name"] += tool_call["function"]["name"]
-                    if tool_call["function"].get("arguments"):
-                        merged[-1]["function"]["arguments"] += tool_call["function"][
-                            "arguments"
-                        ]
+            idx = tool_call["index"]
+            while idx >= len(merged):
+                merged.append(
+                    {
+                        "id": None,
+                        "type": "function",
+                        "function": {"name": "", "arguments": ""},
+                    }
+                )
+            current = merged[idx]
+            if tool_call.get("id"):
+                current["id"] = tool_call["id"]
+            if tool_call.get("function"):
+                if tool_call["function"].get("name"):
+                    current["function"]["name"] += tool_call["function"]["name"]
+                if tool_call["function"].get("arguments"):
+                    current["function"]["arguments"] += tool_call["function"][
+                        "arguments"
+                    ]
         return merged
 
     def _build_headers(self):
