@@ -10,12 +10,7 @@ from rich.panel import Panel
 from rich.spinner import Spinner
 from rich.text import Text
 
-from mchat.commands import (
-    CommandProcessor,
-    create_completer,
-    quit_command,
-    set_chat_context,
-)
+from mchat.commands import Commands, create_completer
 from mchat.config import Config, load_config
 from mchat.llm_client import LLMClient
 from mchat.session import ChatSession
@@ -31,39 +26,41 @@ class Chat:
         )
         self._chat_session = ChatSession(model=self._config.model)
         self._console = console
-        self._command_processor = CommandProcessor(self._console)
-        self._prompt_session = self._get_prompt_session()
 
         self._summary_task = None
         self._save_task = None
+
+        self._prompt_session = PromptSession()
+        self._commands = Commands(
+            console=self._console,
+            llm_client=self._llm_client,
+            chat_session=self._chat_session,
+            prompt_session=self._prompt_session,
+            tasks=[],
+        )
+        self._setup_prompt_session()
 
     async def start(self):
         self._save_task = asyncio.create_task(
             _set_interval(self._chat_session.save, self._config.save_interval)
         )
-        set_chat_context(
-            self._chat_session,
-            self._prompt_session,
-            self._save_task,
-            self._summary_task,
-            self._config,
-        )
+        self._commands._tasks.append(self._save_task)
         while True:
             try:
                 user_input = await self._prompt_session.prompt_async("» ")
             except (EOFError, KeyboardInterrupt):
-                await quit_command()
+                await self._commands._quit_command()
                 exit(0)
 
             user_input = user_input.strip()
             if not user_input:
                 continue
             if user_input.startswith("/"):
-                await self._command_processor.execute(user_input)
+                await self._commands.execute(user_input)
                 continue
 
             await self._chat_completion_stream(user_input)
-            self._create_summary_task()
+            self._commands._tasks.append(self._create_summary_task())
 
     def _build_messages(self, prompt: str) -> list[dict]:
         messages = []
@@ -172,7 +169,11 @@ class Chat:
             )
 
     async def _summarize(self):
-        await self._chat_session.create_summary(self._llm_client, self._config)
+        await self._chat_session.create_summary(
+            self._llm_client,
+            self._chat_session._model,
+            self._config.max_history_turns,
+        )
 
     def _create_summary_task(self):
         if self._summary_task and self._summary_task.done():
@@ -187,15 +188,17 @@ class Chat:
 
         if not self._summary_task:
             self._summary_task = asyncio.create_task(self._summarize())
+        return self._summary_task
 
-    def _get_prompt_session(self):
+    def _setup_prompt_session(self):
         style = Style.from_dict(
             {
                 "completion-menu.completion": "fg:default bg:default",
                 "completion-menu.completion.current": "bold",
             }
         )
-        return PromptSession(completer=create_completer(), style=style)
+        self._prompt_session.completer = create_completer(self._commands)
+        self._prompt_session.style = style
 
 
 async def _set_interval(func, interval):

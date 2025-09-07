@@ -84,7 +84,13 @@ class ChatSession:
         self._history: list[dict] = []
         self._last_summarized_index = -1
 
-    async def create_summary(self, llm_client, config, end_index: int | None = None):
+    async def create_summary(
+        self,
+        llm_client,
+        summary_model: str,
+        max_history_turns: int = -1,
+        end_index: int | None = None,
+    ):
         start_index = self._last_summarized_index + 1
 
         current_messages = self._history.copy()
@@ -94,8 +100,8 @@ class ChatSession:
         else:
             messages_to_summarize = (
                 current_messages[start_index:]
-                if config.max_history_turns == -1
-                else current_messages[start_index : -config.max_history_turns * 2]
+                if max_history_turns == -1
+                else current_messages[start_index : -max_history_turns * 2]
             )
         if not messages_to_summarize:
             return
@@ -121,7 +127,6 @@ Summary:
 """
 
         try:
-            summary_model = config.summary_model or config.model
             self._summary = await llm_client.completion(
                 summary_model, [{"role": "user", "content": summary_prompt}]
             )

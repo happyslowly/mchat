@@ -9,7 +9,6 @@ class Config(BaseModel):
     base_url: str
     api_key: str | None = None
     model: str
-    summary_model: str | None = None
     max_history_turns: int = -1
     timeout: int = -1
     save_interval: int = 300
@@ -28,7 +27,6 @@ def load_config() -> Config:
             base_url=config["base_url"],
             api_key=config.get("api_key"),
             model=config["model"],
-            summary_model=config.get("summary_model"),
             max_history_turns=config.get("max_history_turns", -1),
             timeout=config.get("timeout", -1),
             save_interval=config.get("save_interval", 300),

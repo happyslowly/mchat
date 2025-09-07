@@ -8,7 +8,6 @@ import aiofiles
 import httpx
 from bs4 import BeautifulSoup
 from ddgs import DDGS
-from loguru import logger
 
 
 async def web_search(query: str, max_results: int = 5) -> str:
@@ -170,29 +169,6 @@ def get_tool_schemas():
         }
         schemas.append(schema)
     return schemas
-
-
-# async def exec_tool_calls(tool_calls: list[dict]) -> list[dict]:
-#     results = []
-#     for tool_call in tool_calls:
-#         try:
-#             if tool_call["type"] != "function":
-#                 continue
-#             fn_name = tool_call["function"]["name"]
-#             args_json = tool_call["function"]["arguments"]
-#
-#             if fn_name not in _TOOLS:
-#                 continue
-#
-#             fn = _TOOLS[fn_name]
-#             args = json.loads(args_json)
-#             result = await fn(**args)
-#             results.append(
-#                 {"role": "tool", "tool_call_id": tool_call["id"], "content": result}
-#             )
-#         except Exception as e:
-#             logger.error(f"Tool call `{tool_call['function']['name']}` failed: {e}")
-#     return results
 
 
 async def exec_tool_calls(tool_calls: list[dict]) -> list[dict]:
