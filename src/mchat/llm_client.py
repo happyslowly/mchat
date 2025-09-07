@@ -1,22 +1,14 @@
 import json
-from dataclasses import dataclass, field
-from typing import AsyncIterator, Literal
+from dataclasses import dataclass
+from typing import AsyncIterator, Literal, cast
 
-import httpx
-from loguru import logger
+from openai import AsyncOpenAI
+from openai.types.chat import ChatCompletionMessageParam
+from openai.types.chat.chat_completion_chunk import ChoiceDeltaToolCall
 
 from mchat.tools import exec_tool_calls, get_tool_schemas
 
 EventType = Literal["thinking", "content", "tool_call", "tool_complete", "error"]
-
-
-@dataclass
-class ChunkResult:
-    thinking: str = ""
-    content: str = ""
-    error: str = ""
-    tool_calls: list[dict] = field(default_factory=list)
-    is_done: bool = False
 
 
 @dataclass
@@ -27,67 +19,79 @@ class StreamEvent:
 
 class LLMClient:
     def __init__(self, base_url: str, timeout: int, api_key: str | None = None):
-        self._base_url = base_url
-        self._api_key = api_key
-        self._timeout = timeout if timeout > 0 else None
+        self._openai = AsyncOpenAI(
+            base_url=base_url, api_key=api_key or "dummy-key", timeout=timeout
+        )
 
-    def list_models(self) -> list[str]:
-        with httpx.Client(timeout=self._timeout) as client:
-            response = client.get(
-                self._base_url + "/models", headers=self._build_headers()
-            )
-            response.raise_for_status()
-            data = response.json()["data"]
-            models = []
-            for entry in data:
-                if entry["object"] == "model":
-                    models.append(entry["id"])
-            return models
+    async def list_models(self) -> list[str]:
+        models = await self._openai.models.list()
+        return [m.id for m in models.data]
 
     async def stream_completion(
-        self, model: str, messages: list[dict]
+        self, model: str, messages: list[dict], max_tool_rounds: int = 8
     ) -> AsyncIterator[StreamEvent]:
-        body = {
-            "model": model,
-            "messages": messages,
-            "stream": True,
-            "tools": get_tool_schemas(),
-        }
+        local_messages = messages.copy()
+        rounds = 0
+        while True:
+            try:
+                if rounds >= max_tool_rounds:
+                    yield StreamEvent(
+                        "error",
+                        f"Maximum tool rounds reached ({max_tool_rounds})",
+                    )
+                    return
 
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            while True:
-                try:
-                    async with client.stream(
-                        "POST",
-                        self._base_url + "/chat/completions",
-                        json=body,
-                        headers=self._build_headers(),
-                    ) as response:
-                        tool_calls = []
-                        response.raise_for_status()
-                        finished = False
-                        async for line in response.aiter_lines():
-                            result = self._process_chunk(line)
+                response = await self._openai.chat.completions.create(
+                    model=model,
+                    messages=cast(list[ChatCompletionMessageParam], local_messages),
+                    tools=get_tool_schemas(),
+                    tool_choice="auto",
+                    stream=True,
+                )
+                tool_calls = []
+                async for chunk in response:
+                    if not chunk.choices:
+                        break
 
-                            if result.error:
-                                yield StreamEvent("error", result.error)
-                                finished = True
-                                break
+                    choice = chunk.choices[0]
+                    delta = choice.delta
 
-                            if result.thinking:
-                                yield StreamEvent("thinking", result.thinking)
-                            if result.content:
-                                yield StreamEvent("content", result.content)
-                            if result.tool_calls:
-                                tool_calls.extend(result.tool_calls)
-                            if result.is_done:
-                                finished = True
-                                # continue processing post-stream work
-                                break
+                    if choice.finish_reason in (
+                        "stop",
+                        "length",
+                        "content_filter",
+                    ):
+                        if choice.finish_reason == "stop":
+                            return
+                        detail = ""
+                        refusal_text = getattr(delta, "refusal", None)
+                        if refusal_text:
+                            detail = f": {refusal_text}"
+                        else:
+                            cfr = getattr(choice, "content_filter_results", None)
+                            if cfr:
+                                detail = f": {json.dumps(cfr)}"
+                        yield StreamEvent(
+                            "error",
+                            f"Generation stopped ({choice.finish_reason}){detail}",
+                        )
+                        return
 
+                    if getattr(delta, "reasoning_content", None):
+                        yield StreamEvent(
+                            "thinking", getattr(delta, "reasoning_content")
+                        )
+
+                    if delta.content:
+                        yield StreamEvent("content", delta.content)
+
+                    if delta.tool_calls:
+                        tool_calls.extend(delta.tool_calls)
+
+                if tool_calls:
                     tool_calls_complete = self._merge_tool_calls(tool_calls)
                     if tool_calls_complete:
-                        body["messages"].append(
+                        local_messages.append(
                             {
                                 "role": "assistant",
                                 "content": None,
@@ -101,96 +105,24 @@ class LLMClient:
                             "tool_complete",
                             f"{len(tool_calls_complete)} tool(s) executed",
                         )
-                        body["messages"].extend(tool_messages)
-
-                    # If no tool calls to execute, and stream is finished, exit
-                    if finished and not tool_calls_complete:
-                        return
-                except httpx.TimeoutException as _:
-                    raise TimeoutError("API call timed out")
-                except Exception as e:
-                    raise RuntimeError(f"Error: {e}")
+                        local_messages.extend(tool_messages)
+                        rounds += 1
+                else:
+                    return
+            except Exception as e:
+                yield StreamEvent("error", str(e))
+                return
 
     async def completion(self, model: str, messages: list[dict]) -> str:
-        body = {
-            "model": model,
-            "messages": messages,
-        }
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            try:
-                response = await client.post(
-                    self._base_url + "/chat/completions",
-                    json=body,
-                    headers=self._build_headers(),
-                )
-                data = response.json()
-                return data["choices"][0]["message"]["content"]
-            except httpx.TimeoutException as _:
-                raise TimeoutError("API call timed out")
-            except Exception as e:
-                raise RuntimeError(f"API error: {e}")
+        response = await self._openai.chat.completions.create(
+            model=model, messages=cast(list[ChatCompletionMessageParam], messages)
+        )
+        return response.choices[0].message.content or ""
 
-    def _process_chunk(
-        self,
-        line: str,
-    ) -> ChunkResult:
-        result = ChunkResult()
-
-        if not line:
-            return result
-
-        if line.startswith("error: "):
-            try:
-                error = json.loads(line[7:])["message"]
-            except Exception as _:
-                error = line
-            result.error += error
-            return result
-
-        if not line.startswith("data: "):
-            return result
-
-        payload = line[6:]
-        if payload == "[DONE]":
-            result.is_done = True
-            return result
-
-        try:
-            chunk_data = json.loads(payload)
-        except json.JSONDecodeError as _:
-            logger.error(f"Failed to parse chunk: `{payload}`")
-            return result
-
-        choices = chunk_data.get("choices", [])
-        if not choices:
-            return result
-        choice = choices[0]
-        finish_reason = choice.get("finish_reason")
-        if finish_reason == "stop":
-            result.is_done = True
-
-        delta = choice.get("delta")
-        if not delta:
-            return result
-
-        tool_calls_delta = delta.get("tool_calls")
-        if tool_calls_delta:
-            for tool_calls_part in tool_calls_delta:
-                result.tool_calls.append(tool_calls_part)
-
-        thinking_delta = delta.get("reasoning_content")
-        if thinking_delta:
-            result.thinking += thinking_delta
-        content_delta = delta.get("content")
-        if content_delta:
-            result.content += content_delta
-
-        return result
-
-    def _merge_tool_calls(self, tool_calls: list[dict]) -> list[dict]:
+    def _merge_tool_calls(self, tool_calls: list[ChoiceDeltaToolCall]) -> list[dict]:
         merged = []
         for tool_call in tool_calls:
-            idx = tool_call["index"]
+            idx = tool_call.index
             while idx >= len(merged):
                 merged.append(
                     {
@@ -200,19 +132,12 @@ class LLMClient:
                     }
                 )
             current = merged[idx]
-            if tool_call.get("id"):
-                current["id"] = tool_call["id"]
-            if tool_call.get("function"):
-                if tool_call["function"].get("name"):
-                    current["function"]["name"] += tool_call["function"]["name"]
-                if tool_call["function"].get("arguments"):
-                    current["function"]["arguments"] += tool_call["function"][
-                        "arguments"
-                    ]
-        return merged
+            if tool_call.id:
+                current["id"] = tool_call.id
+            if tool_call.function:
+                if tool_call.function.name:
+                    current["function"]["name"] += tool_call.function.name
+                if tool_call.function.arguments:
+                    current["function"]["arguments"] += tool_call.function.arguments
 
-    def _build_headers(self):
-        headers = {"Content-Type": "application/json"}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
-        return headers
+        return [m for m in merged if m.get("id")]

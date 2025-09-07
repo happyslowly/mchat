@@ -92,94 +92,103 @@ class TestChatMessageBuilding:
 
 
 class TestLLMClientProcessing:
-    """Test LLM client SSE processing"""
+    """Test LLM client streaming processing"""
 
-    @pytest.fixture
-    def llm_client(self):
-        return LLMClient("http://test", 0)
+    @pytest.mark.asyncio
+    async def test_stream_emits_thinking_and_content(self):
+        from types import SimpleNamespace
 
-    def test_process_chunk_single_chunk(self, llm_client):
-        """Test processing a single SSE chunk"""
-        payload = {
-            "choices": [
-                {
-                    "delta": {"content": "Hello", "reasoning_content": "Thinking..."},
-                    "finish_reason": None,
-                }
-            ]
-        }
-        line = f"data: {json.dumps(payload)}"
+        async def stream_gen():
+            # First chunk with thinking + content
+            yield SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            reasoning_content="Thinking...", content="Hello", tool_calls=None
+                        ),
+                        finish_reason=None,
+                    )
+                ]
+            )
+            # Stop chunk
+            yield SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(reasoning_content=None, content=None, tool_calls=None),
+                        finish_reason="stop",
+                    )
+                ]
+            )
 
-        result = llm_client._process_chunk(line)
+        with patch("mchat.llm_client.AsyncOpenAI") as MockAI:
+            instance = MockAI.return_value
+            instance.chat.completions.create = AsyncMock(return_value=stream_gen())
 
-        assert result.thinking == "Thinking..."
-        assert result.content == "Hello"
+            client = LLMClient("http://test", 0)
+            events = []
+            async for ev in client.stream_completion("model", []):
+                events.append((ev.type, ev.data))
 
-    def test_process_chunk_multiple_chunks(self, llm_client):
-        """Test accumulating multiple chunks"""
-        payload1 = {"choices": [{"delta": {"content": "Hello"}, "finish_reason": None}]}
-        payload2 = {
-            "choices": [{"delta": {"content": " world"}, "finish_reason": None}]
-        }
+            assert ("thinking", "Thinking...") in events
+            assert ("content", "Hello") in events
 
-        r1 = llm_client._process_chunk(f"data: {json.dumps(payload1)}")
-        assert r1.content == "Hello"
+    @pytest.mark.asyncio
+    async def test_stream_accumulates_multiple_content_chunks(self):
+        from types import SimpleNamespace
 
-        r2 = llm_client._process_chunk(f"data: {json.dumps(payload2)}")
-        assert r2.content == " world"
+        async def stream_gen():
+            yield SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(reasoning_content=None, content="Hello", tool_calls=None),
+                        finish_reason=None,
+                    )
+                ]
+            )
+            yield SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(reasoning_content=None, content=" world", tool_calls=None),
+                        finish_reason=None,
+                    )
+                ]
+            )
+            yield SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(reasoning_content=None, content=None, tool_calls=None),
+                        finish_reason="stop",
+                    )
+                ]
+            )
 
-    def test_process_chunk_done_signal(self, llm_client):
-        """Test DONE signal stops processing"""
-        line = "data: [DONE]"
+        with patch("mchat.llm_client.AsyncOpenAI") as MockAI:
+            instance = MockAI.return_value
+            instance.chat.completions.create = AsyncMock(return_value=stream_gen())
 
-        result = llm_client._process_chunk(line)
+            client = LLMClient("http://test", 0)
+            contents = []
+            async for ev in client.stream_completion("model", []):
+                if ev.type == "content":
+                    contents.append(ev.data)
 
-        assert result.thinking == ""
-        assert result.content == ""
-        assert result.is_done is True
-
-    def test_process_chunk_invalid_json(self, llm_client):
-        """Test handling of malformed JSON chunks"""
-        line = "data: {invalid json}"
-
-        # Should not raise exception, just log error
-        result = llm_client._process_chunk(line)
-        assert result.thinking == ""
-        assert result.content == ""
-
-    def test_process_chunk_empty_choices(self, llm_client):
-        """Test handling chunks with no choices"""
-        chunk = json.dumps({"choices": []})
-        line = f"data: {chunk}"
-
-        result = llm_client._process_chunk(line)
-
-        assert result.thinking == ""
-        assert result.content == ""
+            assert contents == ["Hello", " world"]
 
 
 class TestLLMClientHeaders:
-    """Test HTTP header construction"""
+    """Test client initialization with API key"""
 
-    def test_build_headers_no_api_key(self):
-        """Test headers without API key"""
-        client = LLMClient("http://test", 0)
+    def test_init_no_api_key_uses_dummy(self):
+        with patch("mchat.llm_client.AsyncOpenAI") as MockAI:
+            LLMClient("http://test", 0)
+            MockAI.assert_called_with(base_url="http://test", api_key="dummy-key", timeout=0)
 
-        headers = client._build_headers()
-
-        assert headers == {"Content-Type": "application/json"}
-
-    def test_build_headers_with_api_key(self):
-        """Test headers with API key"""
-        client = LLMClient("http://test", 0, "sk-test123")
-
-        headers = client._build_headers()
-
-        expected = {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer sk-test123",
-        }
-        assert headers == expected
+    def test_init_with_api_key(self):
+        with patch("mchat.llm_client.AsyncOpenAI") as MockAI:
+            LLMClient("http://test", 0, "sk-test123")
+            MockAI.assert_called_with(
+                base_url="http://test", api_key="sk-test123", timeout=0
+            )
 
 
 class TestConfig:

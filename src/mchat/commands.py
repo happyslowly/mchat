@@ -70,7 +70,7 @@ async def models_command(*args) -> Text:
     llm_client = LLMClient(
         _config.base_url, api_key=_config.api_key, timeout=_config.timeout
     )
-    model_list = llm_client.list_models()
+    model_list = await llm_client.list_models()
     lines = []
     for m in model_list:
         if _chat_session and m == _chat_session._model:
@@ -89,7 +89,7 @@ async def switch_model_command(*args):
     llm_client = LLMClient(
         _config.base_url, api_key=_config.api_key, timeout=_config.timeout
     )
-    model_list = llm_client.list_models()
+    model_list = await llm_client.list_models()
     if model_name not in model_list:
         raise ValueError(f"Model `{model_name}` not found.")
     elif _chat_session:

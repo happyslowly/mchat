@@ -24,6 +24,7 @@ dependencies = [
   "ddgs>=9.5.4",
   "httpx>=0.28.1",
   "loguru>=0.7.3",
+  "openai>=1.106.1",
   "prompt-toolkit>=3.0.51",
   "pydantic>=2.11.7",
   "rich>=14.1.0",

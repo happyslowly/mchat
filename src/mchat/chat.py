@@ -165,8 +165,8 @@ class Chat:
             except Exception as e:
                 live.update(Text(text=str(e), style="red"))
 
-        self._chat_session.add_to_history({"role": "user", "content": prompt})
         if contents:
+            self._chat_session.add_to_history({"role": "user", "content": prompt})
             self._chat_session.add_to_history(
                 {"role": "assistant", "content": "".join(contents)}
             )
