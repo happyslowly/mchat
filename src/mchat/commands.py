@@ -13,24 +13,25 @@ from rich.text import Text
 
 from mchat.llm_client import LLMClient
 from mchat.session import ChatSession
+from mchat.tasks import TaskManager
 
 CommandHandler = Callable[..., Awaitable[str | Text | Markdown | None]]
 
 
-class Commands:
+class CommandManager:
     def __init__(
         self,
         llm_client: LLMClient,
         console: Console,
         chat_session: ChatSession,
         prompt_session: PromptSession,
-        tasks: list,
+        task_manager: TaskManager,
     ):
         self._llm_client = llm_client
         self._console = console
         self._chat_session = chat_session
         self._prompt_session = prompt_session
-        self._tasks = tasks
+        self._task_manager = task_manager
         self._commands = self._get_commands()
 
     def _get_commands(self) -> dict[str, tuple[CommandHandler, str]]:
@@ -59,9 +60,7 @@ class Commands:
         _ = args
         if self._chat_session:
             await self._chat_session.save()
-        for task in self._tasks:
-            if task:
-                task.cancel()
+        self._task_manager.cancel_all()
         exit(0)
 
     async def _help_command(self, *args) -> str:
@@ -217,5 +216,5 @@ class SmartCommandCompleter(Completer):
                     yield Completion(cmd, start_position=-len(word))
 
 
-def create_completer(commands: Commands):
-    return SmartCommandCompleter(list(commands._get_commands().keys()))
+def create_completer(command: CommandManager):
+    return SmartCommandCompleter(list(command._get_commands().keys()))

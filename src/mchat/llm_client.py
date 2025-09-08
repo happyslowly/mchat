@@ -20,7 +20,7 @@ class StreamEvent:
 class LLMClient:
     def __init__(self, base_url: str, timeout: int, api_key: str | None = None):
         self._openai = AsyncOpenAI(
-            base_url=base_url, api_key=api_key or "dummy-key", timeout=timeout
+            base_url=base_url, api_key=api_key or "dummy-key", timeout=float(timeout)
         )
 
     async def list_models(self) -> list[str]:
