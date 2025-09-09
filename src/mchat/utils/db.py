@@ -34,7 +34,7 @@ def select_one(
         if not docs:
             return None
         if len(docs) != 1:
-            raise ValueError(f"Table `{table}` contains multple rows")
+            raise ValueError(f"Table `{table}` contains multiple rows")
         doc = docs[0]
     else:
         doc = table.get(doc_id=doc_id)
@@ -52,6 +52,11 @@ def select_all(table: Table, model_cls: type[TModel]) -> list[TModel]:
     for doc in table:
         result.append(model_cls.model_validate({**doc, "id": doc.doc_id}))
     return result
+
+
+def delete_one(table: Table, doc_id: int) -> bool:
+    deleted = table.remove(doc_ids=[doc_id])
+    return len(deleted) == 1
 
 
 def flush(db: TinyDB):

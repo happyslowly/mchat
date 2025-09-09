@@ -1,5 +1,6 @@
 import json
-from typing import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Awaitable, Callable, Literal
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
@@ -13,9 +14,31 @@ from rich.text import Text
 
 from mchat.llm_client import LLMClient
 from mchat.session import SessionManager
-from mchat.tasks import TaskManager
+from mchat.task import TaskManager
 
 CommandHandler = Callable[..., Awaitable[str | Text | Markdown | None]]
+CommandCategory = Literal["General", "Session", "History", "Model", "System Prompt"]
+
+
+@dataclass
+class CommandInfo:
+    handler: CommandHandler
+    description: str
+    usage: str
+    category: CommandCategory
+
+
+_command_registry: dict[str, CommandInfo] = {}
+
+
+def command(name: str, description: str, usage: str, category: CommandCategory):
+    def decorator(func: CommandHandler):
+        _command_registry[name] = CommandInfo(
+            handler=func, description=description, usage=usage, category=category
+        )
+        return func
+
+    return decorator
 
 
 class CommandManager:
@@ -34,50 +57,59 @@ class CommandManager:
         self._task_manager = task_manager
         self._commands = self._get_commands()
 
-    def _get_commands(self) -> dict[str, tuple[CommandHandler, str]]:
-        return {
-            "quit": (self._quit_command, "Exit the chat application"),
-            "help": (self._help_command, "Show available commands"),
-            "system": (self._system_command, "View or set system prompt"),
-            "models": (self._models_command, "List available models"),
-            "model": (self._switch_model_command, "Switch to specified model"),
-            "sessions": (self._sessions_command, "List conversation sessions"),
-            "session": (
-                self._create_or_switch_session_command,
-                "Create or switch conversation session",
-            ),
-            "history": (
-                self._history_command,
-                "View, clear, or dump conversation history",
-            ),
-            "summary": (
-                self._summary_command,
-                "Create summary of entire conversation history",
-            ),
-            "clear": (self._clear_command, "Clear current chat session"),
-            "edit_mode": (
-                self._edit_mode_command,
-                "Switch between vi/emacs editing mode",
-            ),
-        }
+    def _get_commands(self) -> dict[str, CommandInfo]:
+        commands = {}
+        for name, command_info in _command_registry.items():
+            commands[name] = CommandInfo(
+                handler=getattr(self, command_info.handler.__name__),
+                description=command_info.description,
+                usage=command_info.usage,
+                category=command_info.category,
+            )
+        return commands
 
-    async def _quit_command(self, *args) -> None:
+    @command("quit", "Exit application", "/quit", "General")
+    async def quit(self, *args) -> None:
         _ = args
         self._chat_session_manager.close()
         self._task_manager.cancel_all()
         exit(0)
 
-    async def _help_command(self, *args) -> str:
+    @command("help", "Show this help", "/help", "General")
+    async def help(self, *args) -> Text:
         _ = args
         commands = self._get_commands()
-        max_width = max(len(cmd) for cmd in commands) + 1
-        lines = []
-        for cmd in commands:
-            cmd_text = f"/{cmd}".ljust(max_width + 2)
-            lines.append(f"{cmd_text} {commands[cmd][1]}")
-        return "\n".join(lines)
 
-    async def _models_command(self, *args) -> Text:
+        categories = {}
+        for cmd_name, cmd_info in commands.items():
+            if cmd_info.category not in categories:
+                categories[cmd_info.category] = []
+            categories[cmd_info.category].append((cmd_name, cmd_info))
+
+        max_usage_width = max(len(cmd_info.usage) for cmd_info in commands.values())
+
+        lines = []
+        category_order: list[CommandCategory] = [
+            "General",
+            "Model",
+            "System Prompt",
+            "Session",
+            "History",
+        ]
+
+        for category in category_order:
+            if category in categories:
+                lines.append(Text(f"{category}", style="bold"))
+                for _, cmd_info in sorted(categories[category]):
+                    usage_text = cmd_info.usage.ljust(max_usage_width)
+                    lines.append(
+                        Text(f"  {usage_text}  {cmd_info.description}", style="dim")
+                    )
+
+        return Text("\n").join(lines)
+
+    @command("models", "List models", "/models", "Model")
+    async def list_models(self, *args) -> Text:
         _ = args
         model_list = await self._llm_client.list_models()
         lines = []
@@ -88,7 +120,8 @@ class CommandManager:
                 lines.append(Text(m))
         return Text("\n").join(lines)
 
-    async def _switch_model_command(self, *args):
+    @command("use", "Switch model", "/use <model_name>", "Model")
+    async def use_model(self, *args):
         if not args:
             return
         model_name = args[0]
@@ -97,12 +130,16 @@ class CommandManager:
             raise ValueError(f"Model `{model_name}` not found.")
         self._chat_session_manager.set_model(model_name)
 
-    async def _sessions_command(self, *args) -> Text:
+    @command("sessions", "List sessions", "/sessions", "Session")
+    async def list_sessions(self, *args) -> Text:
         def format(data: dict) -> str:
-            return f"{data['id']}: {data['title']} ({data['updated_at']})"
+            title = data["title"].ljust(max_width + 2)
+            return f"{data['id']}: {title} ({data['updated_at']})"
 
         _ = args
         session_list = self._chat_session_manager.list_sessions()
+
+        max_width = max(len(s["title"]) for s in session_list) + 1
         lines = []
         for s in session_list:
             if s["id"] == self._chat_session_manager.current_session.id:
@@ -111,54 +148,40 @@ class CommandManager:
                 lines.append(Text(format(s)))
         return Text("\n").join(lines)
 
-    async def _create_or_switch_session_command(self, *args):
-        if not args:
-            self._chat_session_manager.switch_session()
-        else:
-            self._chat_session_manager.switch_session(int(args[0]))
+    @command("system", "Show system prompt", "/system", "System Prompt")
+    async def show_system(self, *args) -> str:
+        _ = args
+        return (
+            self._chat_session_manager.current_session.system_prompt
+            or "(No system prompt set)"
+        )
 
-    async def _system_command(self, *args) -> str:
-        if len(args) == 1 and args[0].lower() == "clear":
+    @command("set-system", "Set system prompt", "/set-system [prompt]", "System Prompt")
+    async def set_system(self, *args) -> str:
+        if not args:
             self._chat_session_manager.set_system_prompt("")
+            return "System prompt cleared"
         else:
             self._chat_session_manager.set_system_prompt(" ".join(args))
-        return self._chat_session_manager.current_session.system_prompt
+            return f"System prompt set to: {self._chat_session_manager.current_session.system_prompt}"
 
-    async def _history_command(self, *args) -> str | Markdown:
+    @command("history", "Show history", "/history", "History")
+    async def show_history(self, *args) -> Markdown:
         _ = args
-        if args:
-            if args[0].lower() == "clear":
-                self._chat_session_manager.clear_history()
-                return "Conversation history cleared"
-            if args[0].lower() == "dump":
-                if self._chat_session_manager.current_session.history:
-                    with open("history.jsonl", "w") as f:
-                        for (
-                            message
-                        ) in self._chat_session_manager.current_session.history:
-                            f.write(json.dumps(message))
-                            f.write("\n")
-                    return "Conversation history dumped to history.jsonl"
-                raise ValueError("No conversation history to dump")
-            raise ValueError("Usage: /history [clear|dump]")
-        else:
-            if self._chat_session_manager.current_session.history:
-                lines = []
-                for message in self._chat_session_manager.current_session.history:
-                    content = message["content"]
-                    if message["role"] == "user":
-                        lines.append(f"***You***: *{content}*  ")
-                    else:
-                        lines.append(f"**AI**: {content}  ")
-                lines.append("")
-                return Markdown("\n".join(lines))
-            raise ValueError("No conversation history")
+        if self._chat_session_manager.current_session.history:
+            lines = []
+            for message in self._chat_session_manager.current_session.history:
+                content = message["content"]
+                if message["role"] == "user":
+                    lines.append(f"***You***: *{content}*  ")
+                else:
+                    lines.append(f"**AI**: {content}  ")
+            lines.append("")
+            return Markdown("\n".join(lines))
+        raise ValueError("No conversation history")
 
-    async def _clear_command(self, *args):
-        _ = args
-        self._chat_session_manager.clear_session()
-
-    async def _edit_mode_command(self, *args) -> str:
+    @command("mode", "Set editing mode", "/mode [vi|emacs]", "General")
+    async def set_mode(self, *args) -> str:
         if not self._prompt_session:
             raise ValueError("Prompt session is not available")
         if args:
@@ -169,7 +192,13 @@ class CommandManager:
                 self._prompt_session.editing_mode = EditingMode.EMACS
         return "vi" if self._prompt_session.editing_mode == EditingMode.VI else "emacs"
 
-    async def _summary_command(self, *args) -> str:
+    @command(
+        "summary",
+        "Create conversation summary",
+        "/summary",
+        "History",
+    )
+    async def create_summary(self, *args) -> str:
         _ = args
 
         if not self._chat_session_manager.current_session.history:
@@ -181,6 +210,66 @@ class CommandManager:
             end_index=len(self._chat_session_manager.current_session.history),
         )
         return self._chat_session_manager.current_session.summary
+
+    @command("new-session", "Create new session", "/new-session", "Session")
+    async def new_session(self, *args) -> str:
+        _ = args
+        new_session = self._chat_session_manager.create_session()
+        return f"Created new session: {new_session.id}"
+
+    @command(
+        "switch-session",
+        "Switch to session",
+        "/switch-session <session_id>",
+        "Session",
+    )
+    async def switch_session(self, *args):
+        if not args:
+            raise ValueError("Usage: /switch <session_id>")
+        self._chat_session_manager.switch_session(int(args[0]))
+
+    @command(
+        "delete-session",
+        "Delete session",
+        "/delete-session <session_id>",
+        "Session",
+    )
+    async def delete_session(self, *args) -> str:
+        if not args:
+            raise ValueError("Usage: /rm <session_id>")
+        session_id = int(args[0])
+        session_list = self._chat_session_manager.list_sessions()
+        session_to_delete = next(
+            (s for s in session_list if s["id"] == session_id), None
+        )
+        if not session_to_delete:
+            raise ValueError(f"Session {session_id} not found")
+        self._chat_session_manager.delete_session(session_id)
+        return f"Deleted session: {session_to_delete['title']}"
+
+    @command("clear-history", "Clear history", "/clear-history", "History")
+    async def clear_history(self, *args) -> str:
+        _ = args
+        self._chat_session_manager.clear_history()
+        return "Conversation history cleared"
+
+    @command("export", "Export history to file", "/export [filename]", "History")
+    async def export_history(self, *args) -> str:
+        filename = args[0] if args else "history.jsonl"
+        if self._chat_session_manager.current_session.history:
+            with open(filename, "w") as f:
+                for message in self._chat_session_manager.current_session.history:
+                    f.write(json.dumps(message))
+                    f.write("\n")
+            return f"Conversation history exported to {filename}"
+        raise ValueError("No conversation history to export")
+
+    @command("reset", "Reset session", "/reset", "Session")
+    async def reset_session(self, *args) -> str:
+        _ = args
+        self._chat_session_manager.clear_session()
+        self._chat_session_manager.set_system_prompt("")
+        return "Session reset (history and system prompt cleared)"
 
     async def execute(self, command_line: str):
         parts = command_line[1:].split()
@@ -195,9 +284,9 @@ class CommandManager:
 
         output, error = None, None
         with Live(Spinner("dots"), transient=True) as _:
-            handler, _ = self._commands[cmd_name]
+            command_info = self._commands[cmd_name]
             try:
-                output = await handler(*args)
+                output = await command_info.handler(*args)
             except Exception as e:
                 error = str(e)
         if output:

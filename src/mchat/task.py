@@ -24,6 +24,9 @@ class TaskManager:
         task.add_done_callback(lambda t: self._remove_task(fn.__name__, t))
         self._tasks[fn.__name__].add(task)
 
+    def __contains__(self, fn: Callable) -> bool:
+        return fn.__name__ in self._tasks
+
     def cancel_all(self):
         for task_list in self._tasks.values():
             for t in task_list:

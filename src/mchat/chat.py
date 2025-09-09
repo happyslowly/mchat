@@ -13,7 +13,7 @@ from mchat.commands import CommandManager, create_completer
 from mchat.config import Config, load_config
 from mchat.llm_client import LLMClient
 from mchat.session import SessionManager
-from mchat.tasks import TaskManager
+from mchat.task import TaskManager
 
 
 class Chat:
@@ -46,7 +46,7 @@ class Chat:
             try:
                 user_input = await self._prompt_session.prompt_async("» ")
             except (EOFError, KeyboardInterrupt):
-                await self._command_manager._quit_command()
+                await self._command_manager.quit()
                 exit(0)
 
             user_input = user_input.strip()
@@ -58,6 +58,8 @@ class Chat:
 
             await self._chat_completion_stream(user_input)
             self._task_manager.create_task(self._summarize, exclusive=True)
+            if self._gen_title not in self._task_manager:
+                self._task_manager.create_task(self._gen_title, interval=60)
 
     def _build_messages(self, prompt: str) -> list[dict]:
         messages = []
@@ -116,6 +118,7 @@ class Chat:
         return panels
 
     async def _chat_completion_stream(self, prompt: str):
+        session = self._session_manager.current_session
         messages = self._build_messages(prompt)
 
         tool_contents = []
@@ -127,7 +130,7 @@ class Chat:
             try:
                 waiting = True
                 async for event in self._llm_client.stream_completion(
-                    self._session_manager.current_session.model, messages
+                    session.model, messages
                 ):
 
                     if event.type == "error":
@@ -163,11 +166,18 @@ class Chat:
             )
 
     async def _summarize(self):
+        session = self._session_manager.current_session
         await self._session_manager.create_summary(
             self._llm_client,
-            summary_model=self._config.summary_model
-            or self._session_manager.current_session.model,
+            summary_model=self._config.summary_model or session.model,
             max_history_turns=self._config.max_history_turns,
+        )
+
+    async def _gen_title(self):
+        session = self._session_manager.current_session
+        await self._session_manager.generate_title(
+            self._llm_client,
+            summary_model=self._config.summary_model or session.model,
         )
 
     def _setup_prompt_session(self):

@@ -66,21 +66,30 @@ class SessionManager:
         items.sort(key=lambda d: d.get("updated_at") or "", reverse=True)
         return items
 
-    def switch_session(self, session_id: int | None = None) -> Session:
-        if session_id is None:
-            session = self._new_session()
-        else:
-            session = db.select_one(
-                self._session_table, model_cls=Session, doc_id=session_id
-            )
-            if not session:
-                raise ValueError(f"Session id `{session_id}` not found")
-            self._current_session.updated_at = datetime.now(timezone.utc)
-            db.update(self._session_table, self._current_session)
+    def create_session(self) -> Session:
+        session = self._new_session()
+        self._current_session.updated_at = datetime.now(timezone.utc)
+        db.update(self._session_table, self._current_session)
         self._current_session = session
         self._session_meta.latest_session_id = session.id
-
         return session
+
+    def switch_session(self, session_id: int) -> Session:
+        session = db.select_one(
+            self._session_table, model_cls=Session, doc_id=session_id
+        )
+        if not session:
+            raise ValueError(f"Session id `{session_id}` not found")
+        self._current_session.updated_at = datetime.now(timezone.utc)
+        db.update(self._session_table, self._current_session)
+        self._current_session = session
+        self._session_meta.latest_session_id = session.id
+        return session
+
+    def delete_session(self, session_id: int):
+        if session_id == self._current_session.id:
+            raise ValueError("Cannot delete current active session")
+        db.delete_one(self._session_table, session_id)
 
     def add_to_history(self, message: dict):
         self._current_session.history.append(message)
@@ -122,6 +131,37 @@ class SessionManager:
         db.update(self._session_table, self._current_session)
         db.close(self._db)
 
+    async def generate_title(self, llm_client: LLMClient, summary_model: str):
+        input = self._current_session.summary or "\n".join(
+            str(self._current_session.history[:4])
+        )
+
+        prompt = f"""
+You are given a conversation between a user and an AI assistant.
+Your task is to generate a short, descriptive, and engaging title for the conversation.
+
+Requirements:
+- The title should be concise (max 8 words).
+- It should capture the main topic or problem.
+- Avoid generic phrases like "Chat" or "Conversation."
+- Capitalize like a headline.
+
+Conversation:
+{ input }
+
+Title:
+"""
+
+        try:
+            self._current_session.title = await llm_client.completion(
+                summary_model,
+                [{"role": "user", "content": prompt}],
+            )
+            self._current_session.updated_at = datetime.now(timezone.utc)
+            db.update(self._session_table, self._current_session)
+        except Exception as e:
+            raise RuntimeError(f"Failed to generate session title: {e}")
+
     async def create_summary(
         self,
         llm_client: LLMClient,
@@ -149,20 +189,20 @@ class SessionManager:
         )
 
         summary_prompt = f"""
-    Summarize this conversation, incorporating the previous summary if provided.
+Summarize this conversation, incorporating the previous summary if provided.
 
-    Previous summary: {self._current_session.summary}
+Previous summary: {self._current_session.summary}
 
-    Recent conversation:
-    {recent_history_text}
+Recent conversation:
+{recent_history_text}
 
-    Create a concise summary (2-3 sentences) that:
-    - Incorporates key points from the previous summary
-    - Adds important new topics and conclusions
-    - Maintains context needed for future messages
+Create a concise summary (2-3 sentences) that:
+- Incorporates key points from the previous summary
+- Adds important new topics and conclusions
+- Maintains context needed for future messages
 
-    Summary:
-    """
+Summary:
+"""
 
         try:
             self._current_session.summary = await llm_client.completion(
