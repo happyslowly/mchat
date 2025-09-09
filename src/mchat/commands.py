@@ -12,7 +12,7 @@ from rich.spinner import Spinner
 from rich.text import Text
 
 from mchat.llm_client import LLMClient
-from mchat.session import ChatSession
+from mchat.session import SessionManager
 from mchat.tasks import TaskManager
 
 CommandHandler = Callable[..., Awaitable[str | Text | Markdown | None]]
@@ -23,13 +23,13 @@ class CommandManager:
         self,
         llm_client: LLMClient,
         console: Console,
-        chat_session: ChatSession,
+        chat_session_manager: SessionManager,
         prompt_session: PromptSession,
         task_manager: TaskManager,
     ):
         self._llm_client = llm_client
         self._console = console
-        self._chat_session = chat_session
+        self._chat_session_manager = chat_session_manager
         self._prompt_session = prompt_session
         self._task_manager = task_manager
         self._commands = self._get_commands()
@@ -41,6 +41,11 @@ class CommandManager:
             "system": (self._system_command, "View or set system prompt"),
             "models": (self._models_command, "List available models"),
             "model": (self._switch_model_command, "Switch to specified model"),
+            "sessions": (self._sessions_command, "List conversation sessions"),
+            "session": (
+                self._create_or_switch_session_command,
+                "Create or switch conversation session",
+            ),
             "history": (
                 self._history_command,
                 "View, clear, or dump conversation history",
@@ -58,8 +63,7 @@ class CommandManager:
 
     async def _quit_command(self, *args) -> None:
         _ = args
-        if self._chat_session:
-            await self._chat_session.save()
+        self._chat_session_manager.close()
         self._task_manager.cancel_all()
         exit(0)
 
@@ -78,7 +82,7 @@ class CommandManager:
         model_list = await self._llm_client.list_models()
         lines = []
         for m in model_list:
-            if self._chat_session and m == self._chat_session._model:
+            if m == self._chat_session_manager.current_session.model:
                 lines.append(Text(m, style="green"))
             else:
                 lines.append(Text(m))
@@ -91,41 +95,56 @@ class CommandManager:
         model_list = await self._llm_client.list_models()
         if model_name not in model_list:
             raise ValueError(f"Model `{model_name}` not found.")
-        elif self._chat_session:
-            self._chat_session._model = model_name
+        self._chat_session_manager.set_model(model_name)
+
+    async def _sessions_command(self, *args) -> Text:
+        def format(data: dict) -> str:
+            return f"{data['id']}: {data['title']} ({data['updated_at']})"
+
+        _ = args
+        session_list = self._chat_session_manager.list_sessions()
+        lines = []
+        for s in session_list:
+            if s["id"] == self._chat_session_manager.current_session.id:
+                lines.append(Text(format(s), style="green"))
+            else:
+                lines.append(Text(format(s)))
+        return Text("\n").join(lines)
+
+    async def _create_or_switch_session_command(self, *args):
+        if not args:
+            self._chat_session_manager.switch_session()
+        else:
+            self._chat_session_manager.switch_session(int(args[0]))
 
     async def _system_command(self, *args) -> str:
-        if not self._chat_session:
-            raise ValueError("Chat session is not available")
-        elif len(args) == 1 and args[0].lower() == "clear":
-            self._chat_session.system_prompt = ""
+        if len(args) == 1 and args[0].lower() == "clear":
+            self._chat_session_manager.set_system_prompt("")
         else:
-            self._chat_session.system_prompt = " ".join(args)
-        return self._chat_session.system_prompt
+            self._chat_session_manager.set_system_prompt(" ".join(args))
+        return self._chat_session_manager.current_session.system_prompt
 
     async def _history_command(self, *args) -> str | Markdown:
         _ = args
-        if not self._chat_session:
-            raise ValueError("Chat session is not available")
-
         if args:
             if args[0].lower() == "clear":
-                self._chat_session.history.clear()
-                self._chat_session.summary = ""
+                self._chat_session_manager.clear_history()
                 return "Conversation history cleared"
             if args[0].lower() == "dump":
-                if self._chat_session.history:
+                if self._chat_session_manager.current_session.history:
                     with open("history.jsonl", "w") as f:
-                        for message in self._chat_session.history:
+                        for (
+                            message
+                        ) in self._chat_session_manager.current_session.history:
                             f.write(json.dumps(message))
                             f.write("\n")
                     return "Conversation history dumped to history.jsonl"
                 raise ValueError("No conversation history to dump")
             raise ValueError("Usage: /history [clear|dump]")
         else:
-            if self._chat_session.history:
+            if self._chat_session_manager.current_session.history:
                 lines = []
-                for message in self._chat_session.history:
+                for message in self._chat_session_manager.current_session.history:
                     content = message["content"]
                     if message["role"] == "user":
                         lines.append(f"***You***: *{content}*  ")
@@ -137,9 +156,7 @@ class CommandManager:
 
     async def _clear_command(self, *args):
         _ = args
-        if not self._chat_session:
-            return
-        self._chat_session.clear()
+        self._chat_session_manager.clear_session()
 
     async def _edit_mode_command(self, *args) -> str:
         if not self._prompt_session:
@@ -155,18 +172,15 @@ class CommandManager:
     async def _summary_command(self, *args) -> str:
         _ = args
 
-        if not self._chat_session:
-            raise ValueError("Chat session is not available")
-
-        if not self._chat_session.history:
+        if not self._chat_session_manager.current_session.history:
             raise ValueError("No conversation history to summarize")
 
-        await self._chat_session.create_summary(
+        await self._chat_session_manager.create_summary(
             self._llm_client,
-            self._chat_session._model,
-            end_index=len(self._chat_session.history),
+            self._chat_session_manager.current_session.model,
+            end_index=len(self._chat_session_manager.current_session.history),
         )
-        return self._chat_session.summary
+        return self._chat_session_manager.current_session.summary
 
     async def execute(self, command_line: str):
         parts = command_line[1:].split()

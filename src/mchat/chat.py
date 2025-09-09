@@ -12,7 +12,7 @@ from rich.text import Text
 from mchat.commands import CommandManager, create_completer
 from mchat.config import Config, load_config
 from mchat.llm_client import LLMClient
-from mchat.session import ChatSession
+from mchat.session import SessionManager
 from mchat.tasks import TaskManager
 
 
@@ -24,9 +24,9 @@ class Chat:
             api_key=self._config.api_key,
             timeout=self._config.timeout,
         )
-        self._chat_session = ChatSession(model=self._config.model)
-        self._console = console
+        self._session_manager = SessionManager(default_model=self._config.model)
         self._task_manager = TaskManager()
+        self._console = console
 
         self._summary_task = None
         self._save_task = None
@@ -35,16 +35,13 @@ class Chat:
         self._command_manager = CommandManager(
             console=self._console,
             llm_client=self._llm_client,
-            chat_session=self._chat_session,
+            chat_session_manager=self._session_manager,
             prompt_session=self._prompt_session,
             task_manager=self._task_manager,
         )
         self._setup_prompt_session()
 
     async def start(self):
-        self._task_manager.create_task(
-            self._chat_session.save, interval=self._config.save_interval
-        )
         while True:
             try:
                 user_input = await self._prompt_session.prompt_async("» ")
@@ -64,16 +61,13 @@ class Chat:
 
     def _build_messages(self, prompt: str) -> list[dict]:
         messages = []
-        system_prompt = self._chat_session.system_prompt or ""
-        if self._chat_session.summary:
-            system_prompt += (
-                f"\n\nPrevious conversation summary: {self._chat_session.summary}"
-            )
+        session = self._session_manager.current_session
+        system_prompt = session.system_prompt or ""
+        if session.summary:
+            system_prompt += f"\n\nPrevious conversation summary: {session.summary}"
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-        messages.extend(
-            self._chat_session.history[self._chat_session.last_summarized_index + 1 :]
-        )
+        messages.extend(session.history[session.last_summarized_index + 1 :])
         messages.append({"role": "user", "content": prompt})
         return messages
 
@@ -133,7 +127,7 @@ class Chat:
             try:
                 waiting = True
                 async for event in self._llm_client.stream_completion(
-                    self._chat_session._model, messages
+                    self._session_manager.current_session.model, messages
                 ):
 
                     if event.type == "error":
@@ -163,16 +157,17 @@ class Chat:
                 live.update(Text(text=str(e), style="red"))
 
         if contents:
-            self._chat_session.add_to_history({"role": "user", "content": prompt})
-            self._chat_session.add_to_history(
+            self._session_manager.add_to_history({"role": "user", "content": prompt})
+            self._session_manager.add_to_history(
                 {"role": "assistant", "content": "".join(contents)}
             )
 
     async def _summarize(self):
-        await self._chat_session.create_summary(
+        await self._session_manager.create_summary(
             self._llm_client,
-            self._chat_session._model,
-            self._config.max_history_turns,
+            summary_model=self._config.summary_model
+            or self._session_manager.current_session.model,
+            max_history_turns=self._config.max_history_turns,
         )
 
     def _setup_prompt_session(self):

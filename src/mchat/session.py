@@ -1,99 +1,137 @@
-import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
-import aiofiles
-from loguru import logger
+from pydantic import BaseModel, Field
+from tinydb import TinyDB
+from tinydb.middlewares import CachingMiddleware
+from tinydb.storages import JSONStorage
+
+from mchat.llm_client import LLMClient
+from mchat.utils import db
 
 
-class ChatSession:
-    def __init__(self, model: str):
-        session_path = self._get_session_path()
-        try:
-            with open(session_path, "rb") as f:
-                doc = json.loads(f.read())
-                self._system_prompt = doc["system_prompt"]
-                self._history = doc["history"]
-                self._summary = doc["summary"]
-                self._last_summarized_index = doc.get("last_summarized_index", -1)
-        except Exception as e:
-            logger.warning("Failed to load chat session file: {}", e)
-            self._system_prompt = ""
-            self._summary = ""
-            self._history: list[dict] = []
-            self._last_summarized_index = -1
-        self._model = model
+class Session(BaseModel):
+    id: int
+    title: str
+    model: str
+    system_prompt: str = ""
+    summary: str = ""
+    history: list[dict] = Field(default_factory=list)
+    last_summarized_index: int = -1
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    @staticmethod
-    def _get_session_path():
-        if "XDG_DATA_HOME" in os.environ:
-            data_path = Path(os.environ["XDG_DATA_HOME"])
-        else:
-            data_path = Path.home() / ".local" / "share"
-        return data_path / "mchat" / "session.json"
 
-    @property
-    def history(self):
-        return self._history
+class SessionMeta(BaseModel):
+    id: int
+    latest_session_id: int | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    @property
-    def system_prompt(self):
-        return self._system_prompt
 
-    @system_prompt.setter
-    def system_prompt(self, value):
-        self._system_prompt = value
+class SessionManager:
+    def __init__(self, default_model: str, continue_last_session: bool = True):
+        self._db_cache = CachingMiddleware(JSONStorage)
+        self._db = TinyDB(self._get_db_path(), storage=self._db_cache)
+        self._session_table = self._db.table("sessions")
+        self._meta_table = self._db.table("meta")
 
-    @property
-    def summary(self):
-        return self._summary
+        self._model = default_model
+        self._continue_last_session = continue_last_session
 
-    @summary.setter
-    def summary(self, value):
-        self._summary = value
+        self._session_meta = self._get_or_create_session_meta()
+        self._current_session = self._get_or_create_current_session()
 
     @property
-    def last_summarized_index(self):
-        return self._last_summarized_index
+    def current_session(self) -> Session:
+        return self._current_session
 
-    @last_summarized_index.setter
-    def last_summarized_index(self, value):
-        self._last_summarized_index = value
-
-    async def save(self):
-        session_path = self._get_session_path()
-        os.makedirs(session_path.parent, exist_ok=True)
-        async with aiofiles.open(session_path, "w") as f:
-            await f.write(
-                json.dumps(
-                    {
-                        "system_prompt": self._system_prompt,
-                        "history": self._history,
-                        "summary": self._summary,
-                        "last_summarized_index": self._last_summarized_index,
-                    }
-                )
+    def list_sessions(self) -> list[dict]:
+        items: list[dict] = []
+        for session in db.select_all(self._session_table, Session):
+            items.append(
+                {
+                    "id": session.id,
+                    "title": session.title,
+                    "model": session.model,
+                    "created_at": session.created_at.astimezone().strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    ),
+                    "updated_at": session.updated_at.astimezone().strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    ),
+                }
             )
+        items.sort(key=lambda d: d.get("updated_at") or "", reverse=True)
+        return items
+
+    def switch_session(self, session_id: int | None = None) -> Session:
+        if session_id is None:
+            session = self._new_session()
+        else:
+            session = db.select_one(
+                self._session_table, model_cls=Session, doc_id=session_id
+            )
+            if not session:
+                raise ValueError(f"Session id `{session_id}` not found")
+            self._current_session.updated_at = datetime.now(timezone.utc)
+            db.update(self._session_table, self._current_session)
+        self._current_session = session
+        self._session_meta.latest_session_id = session.id
+
+        return session
 
     def add_to_history(self, message: dict):
-        self._history.append(message)
+        self._current_session.history.append(message)
+        self._current_session.updated_at = datetime.now(timezone.utc)
+        db.update(self._session_table, self._current_session)
 
-    def clear(self):
-        self._system_prompt = ""
-        self._summary = ""
-        self._history: list[dict] = []
-        self._last_summarized_index = -1
+    def clear_session(self):
+        self._current_session.system_prompt = ""
+        self._current_session.history = []
+        self._current_session.summary = ""
+        self._current_session.last_summarized_index = -1
+        self._current_session.updated_at = datetime.now(timezone.utc)
+        db.update(self._session_table, self._current_session)
+
+    def clear_history(self):
+        self._current_session.history = []
+        self._current_session.summary = ""
+        self._current_session.last_summarized_index = -1
+        self._current_session.updated_at = datetime.now(timezone.utc)
+        db.update(self._session_table, self._current_session)
+
+    def set_system_prompt(self, system_prompt):
+        self._current_session.system_prompt = system_prompt
+        self._current_session.updated_at = datetime.now(timezone.utc)
+        db.update(self._session_table, self._current_session)
+
+    def set_model(self, model: str):
+        self._current_session.model = model
+        self._current_session.updated_at = datetime.now(timezone.utc)
+        db.update(self._session_table, self._current_session)
+
+    def flush(self) -> None:
+        db.update(self._meta_table, self._session_meta)
+        db.update(self._session_table, self._current_session)
+        db.flush(self._db)
+
+    def close(self) -> None:
+        db.update(self._meta_table, self._session_meta)
+        db.update(self._session_table, self._current_session)
+        db.close(self._db)
 
     async def create_summary(
         self,
-        llm_client,
+        llm_client: LLMClient,
         summary_model: str,
         max_history_turns: int = -1,
         end_index: int | None = None,
     ):
-        start_index = self._last_summarized_index + 1
+        start_index = self._current_session.last_summarized_index + 1
 
-        current_messages = self._history.copy()
+        current_messages = self._current_session.history.copy()
 
         if end_index is not None:
             messages_to_summarize = current_messages[start_index:end_index]
@@ -111,26 +149,71 @@ class ChatSession:
         )
 
         summary_prompt = f"""
-Summarize this conversation, incorporating the previous summary if provided.
+    Summarize this conversation, incorporating the previous summary if provided.
 
-Previous summary: {self._summary}
+    Previous summary: {self._current_session.summary}
 
-Recent conversation:
-{recent_history_text}
+    Recent conversation:
+    {recent_history_text}
 
-Create a concise summary (2-3 sentences) that:
-- Incorporates key points from the previous summary
-- Adds important new topics and conclusions
-- Maintains context needed for future messages
+    Create a concise summary (2-3 sentences) that:
+    - Incorporates key points from the previous summary
+    - Adds important new topics and conclusions
+    - Maintains context needed for future messages
 
-Summary:
-"""
+    Summary:
+    """
 
         try:
-            self._summary = await llm_client.completion(
-                summary_model, [{"role": "user", "content": summary_prompt}]
+            self._current_session.summary = await llm_client.completion(
+                summary_model,
+                [{"role": "user", "content": summary_prompt}],
             )
             new_index = start_index + len(messages_to_summarize) - 1
-            self._last_summarized_index = new_index
+            self._current_session.last_summarized_index = new_index
+            self._current_session.updated_at = datetime.now(timezone.utc)
+            db.update(self._session_table, self._current_session)
         except Exception as e:
             raise RuntimeError(f"Failed to create conversation summary: {e}")
+
+    def _get_or_create_session_meta(self) -> SessionMeta:
+        meta = db.select_one(self._meta_table, SessionMeta)
+        if not meta:
+            meta = SessionMeta(id=-1)
+            meta = db.insert(self._meta_table, meta)
+        return meta
+
+    def _get_or_create_current_session(self) -> Session:
+        if (
+            self._session_meta.latest_session_id is not None
+            and self._continue_last_session
+        ):
+            session = db.select_one(
+                self._session_table,
+                model_cls=Session,
+                doc_id=self._session_meta.latest_session_id,
+            )
+            if not session:
+                raise ValueError(
+                    f"Session `{self._session_meta.latest_session_id}` not found"
+                )
+        else:
+            session = self._new_session()
+        self._current_session = session
+        return session
+
+    def _new_session(self) -> Session:
+        session = Session(id=-1, model=self._model, title="Untitled")
+        session = db.insert(self._session_table, session)
+        self._session_meta.latest_session_id = session.id
+        return session
+
+    @classmethod
+    def _get_db_path(cls) -> Path:
+        if "XDG_DATA_HOME" in os.environ:
+            data_path = Path(os.environ["XDG_DATA_HOME"])
+        else:
+            data_path = Path.home() / ".local" / "share"
+        db_dir = data_path / "mchat"
+        db_dir.mkdir(parents=True, exist_ok=True)
+        return db_dir / "sessions.db"
