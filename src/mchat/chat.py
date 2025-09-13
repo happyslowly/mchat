@@ -1,4 +1,9 @@
+import getpass
 import json
+import os
+import platform
+import socket
+from datetime import date, datetime
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.styles import Style
@@ -10,7 +15,7 @@ from rich.spinner import Spinner
 from rich.text import Text
 
 from mchat.commands import CommandManager, create_completer
-from mchat.config import Config, load_config
+from mchat.config import Config, get_config
 from mchat.llm_client import LLMClient
 from mchat.session import SessionManager
 from mchat.task import TaskManager
@@ -18,7 +23,7 @@ from mchat.task import TaskManager
 
 class Chat:
     def __init__(self, console: Console, config: Config | None = None):
-        self._config = config or load_config()
+        self._config = config or get_config()
         self._llm_client = LLMClient(
             self._config.base_url,
             api_key=self._config.api_key,
@@ -64,7 +69,7 @@ class Chat:
     def _build_messages(self, prompt: str) -> list[dict]:
         messages = []
         session = self._session_manager.current_session
-        system_prompt = session.system_prompt or ""
+        system_prompt = session.system_prompt.format(**self._get_variables()) or ""
         if session.summary:
             system_prompt += f"\n\nPrevious conversation summary: {session.summary}"
         if system_prompt:
@@ -189,3 +194,17 @@ class Chat:
         )
         self._prompt_session.completer = create_completer(self._command_manager)
         self._prompt_session.style = style
+
+    def _get_variables(self):
+        now = datetime.now()
+        return {
+            "current_timestamp": now.isoformat(),
+            "current_date": date.today().isoformat(),
+            "current_time": now.strftime("%H:%M:%S"),
+            "username": getpass.getuser(),
+            "hostname": socket.gethostname(),
+            "platform": platform.system(),
+            "platform_version": platform.version(),
+            "python_version": platform.python_version(),
+            "cwd": os.getcwd(),
+        }

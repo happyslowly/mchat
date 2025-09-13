@@ -3,16 +3,18 @@ import inspect
 import json
 from pathlib import Path
 from typing import get_type_hints
+from urllib.parse import quote
 
 import aiofiles
 import httpx
 from bs4 import BeautifulSoup
-from ddgs import DDGS
+
+from mchat.config import get_config
 
 
 async def web_search(query: str, max_results: int = 5) -> str:
     """
-    Perform a web search using DDGS metasearch engine.
+    Perform a web search using Google engine.
 
     Args:
         query: The search query
@@ -22,16 +24,26 @@ async def web_search(query: str, max_results: int = 5) -> str:
         Formatted string containing search results with title, URL, and snippet
         for each result, separated by "---" dividers
     """
-    with DDGS() as ddgs:
-        results = await asyncio.to_thread(
-            lambda q, m: list(ddgs.text(q, max_results=m)), query, max_results
-        )
-        return "\n".join(
-            [
-                f"Title: {r['title']}\nURL: {r['href']}\nSnippet: {r['body']}...\n---"
-                for r in results
-            ]
-        )
+    config = get_config()
+
+    url = (
+        f"https://www.googleapis.com/customsearch/v1"
+        f"?key={config.google_api_key}"
+        f"&cx={config.google_search_engine_id}"
+        f"&q={quote(query)}"
+    )
+
+    async with httpx.AsyncClient() as client:
+        results = []
+        response = await client.get(url)
+        response.raise_for_status()
+        data = response.json()
+        items = data["items"][:max_results]
+        for item in items:
+            results.append(
+                f"Title: {item['title']}\nURL: {item['link']}\nSnippet: {item['snippet']}...\n---"
+            )
+        return "\n".join(results)
 
 
 async def extract_web_page(url: str) -> str:
@@ -45,16 +57,13 @@ async def extract_web_page(url: str) -> str:
         The extracted text content from the web page
     """
     async with httpx.AsyncClient(timeout=30) as client:
-        try:
-            response = await client.get(url)
-            soup = BeautifulSoup(response.content, "html.parser")
-            for script in soup(["script", "style", "nav", "header", "footer", "aside"]):
-                script.decompose()
-            text = soup.get_text()
-            lines = [line.strip() for line in text.splitlines()]
-            return "\n".join(line for line in lines if line)
-        except Exception as e:
-            raise RuntimeError(f"Failed to fetch from `{url}`: {e}")
+        response = await client.get(url)
+        soup = BeautifulSoup(response.content, "html.parser")
+        for script in soup(["script", "style", "nav", "header", "footer", "aside"]):
+            script.decompose()
+        text = soup.get_text()
+        lines = [line.strip() for line in text.splitlines()]
+        return "\n".join(line for line in lines if line)
 
 
 async def read_file(file_path: str, encoding: str = "utf-8") -> str:
@@ -68,15 +77,12 @@ async def read_file(file_path: str, encoding: str = "utf-8") -> str:
     Returns:
         str: File content, or error message starting with "Error:"
     """
-    try:
-        path = Path(file_path)
-        if not path.exists():
-            raise FileNotFoundError(f"File not found: {file_path}")
-        async with aiofiles.open(path, "r", encoding=encoding) as f:
-            content = await f.read()
-        return content
-    except Exception as e:
-        return f"Error: {str(e)}"
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+    async with aiofiles.open(path, "r", encoding=encoding) as f:
+        content = await f.read()
+    return content
 
 
 async def write_file(file_path: str, content: str, encoding: str = "utf-8") -> str:
@@ -91,14 +97,11 @@ async def write_file(file_path: str, content: str, encoding: str = "utf-8") -> s
     Returns:
         str: Success message or error message starting with "Error:"
     """
-    try:
-        path = Path(file_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        async with aiofiles.open(path, "w", encoding=encoding) as f:
-            await f.write(content)
-        return f"Successfully wrote {len(content)} characters to {file_path}"
-    except Exception as e:
-        return f"Error: {str(e)}"
+    path = Path(file_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    async with aiofiles.open(path, "w", encoding=encoding) as f:
+        await f.write(content)
+    return f"Successfully wrote {len(content)} characters to {file_path}"
 
 
 _TOOLS = {

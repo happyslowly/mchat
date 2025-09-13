@@ -1,4 +1,3 @@
-import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -8,7 +7,6 @@ from rich.console import Console
 from mchat.chat import Chat
 from mchat.config import Config
 from mchat.llm_client import LLMClient
-from mchat.session import ChatSession
 
 
 class TestChatMessageBuilding:
@@ -24,19 +22,23 @@ class TestChatMessageBuilding:
             api_key=None,
             timeout=-1,
             save_interval=300,
+            google_api_key="",
+            google_search_engine_id="",
         )
         chat = Chat(Console(), config=cfg)
 
         # Mock chat session with history
-        chat._chat_session._system_prompt = "You are helpful"
-        chat._chat_session._summary = "Previous chat about coding"
-        chat._chat_session._history = [
+        chat._session_manager.current_session.system_prompt = "You are helpful"
+        chat._session_manager.current_session.summary = "Previous chat about coding"
+        chat._session_manager.current_session.history = [
             {"role": "user", "content": "Hello"},
             {"role": "assistant", "content": "Hi there"},
             {"role": "user", "content": "How are you?"},
             {"role": "assistant", "content": "I'm good"},
         ]
-        chat._chat_session.last_summarized_index = 1  # Summarized first 2 messages
+        chat._session_manager.current_session.last_summarized_index = (
+            1  # Summarized first 2 messages
+        )
         return chat
 
     def test_build_messages_with_system_and_summary(self, mock_chat):
@@ -58,7 +60,7 @@ class TestChatMessageBuilding:
 
     def test_build_messages_no_system_prompt(self, mock_chat):
         """Test with only summary, no system prompt"""
-        mock_chat._chat_session._system_prompt = ""
+        mock_chat._session_manager.current_session.system_prompt = ""
 
         messages = mock_chat._build_messages("Test")
 
@@ -71,7 +73,7 @@ class TestChatMessageBuilding:
 
     def test_build_messages_no_summary(self, mock_chat):
         """Test with system prompt but no summary"""
-        mock_chat._chat_session._summary = ""
+        mock_chat._session_manager.current_session.summary = ""
 
         messages = mock_chat._build_messages("Test")
 
@@ -81,8 +83,8 @@ class TestChatMessageBuilding:
 
     def test_build_messages_no_history(self, mock_chat):
         """Test with empty conversation history"""
-        mock_chat._chat_session._history = []
-        mock_chat._chat_session.last_summarized_index = -1
+        mock_chat._session_manager.current_session.history = []
+        mock_chat._session_manager.current_session.last_summarized_index = -1
 
         messages = mock_chat._build_messages("First message")
 
@@ -104,7 +106,9 @@ class TestLLMClientProcessing:
                 choices=[
                     SimpleNamespace(
                         delta=SimpleNamespace(
-                            reasoning_content="Thinking...", content="Hello", tool_calls=None
+                            reasoning_content="Thinking...",
+                            content="Hello",
+                            tool_calls=None,
                         ),
                         finish_reason=None,
                     )
@@ -114,7 +118,9 @@ class TestLLMClientProcessing:
             yield SimpleNamespace(
                 choices=[
                     SimpleNamespace(
-                        delta=SimpleNamespace(reasoning_content=None, content=None, tool_calls=None),
+                        delta=SimpleNamespace(
+                            reasoning_content=None, content=None, tool_calls=None
+                        ),
                         finish_reason="stop",
                     )
                 ]
@@ -140,7 +146,9 @@ class TestLLMClientProcessing:
             yield SimpleNamespace(
                 choices=[
                     SimpleNamespace(
-                        delta=SimpleNamespace(reasoning_content=None, content="Hello", tool_calls=None),
+                        delta=SimpleNamespace(
+                            reasoning_content=None, content="Hello", tool_calls=None
+                        ),
                         finish_reason=None,
                     )
                 ]
@@ -148,7 +156,9 @@ class TestLLMClientProcessing:
             yield SimpleNamespace(
                 choices=[
                     SimpleNamespace(
-                        delta=SimpleNamespace(reasoning_content=None, content=" world", tool_calls=None),
+                        delta=SimpleNamespace(
+                            reasoning_content=None, content=" world", tool_calls=None
+                        ),
                         finish_reason=None,
                     )
                 ]
@@ -156,7 +166,9 @@ class TestLLMClientProcessing:
             yield SimpleNamespace(
                 choices=[
                     SimpleNamespace(
-                        delta=SimpleNamespace(reasoning_content=None, content=None, tool_calls=None),
+                        delta=SimpleNamespace(
+                            reasoning_content=None, content=None, tool_calls=None
+                        ),
                         finish_reason="stop",
                     )
                 ]
@@ -181,7 +193,9 @@ class TestLLMClientHeaders:
     def test_init_no_api_key_uses_dummy(self):
         with patch("mchat.llm_client.AsyncOpenAI") as MockAI:
             LLMClient("http://test", 0)
-            MockAI.assert_called_with(base_url="http://test", api_key="dummy-key", timeout=0)
+            MockAI.assert_called_with(
+                base_url="http://test", api_key="dummy-key", timeout=0
+            )
 
     def test_init_with_api_key(self):
         with patch("mchat.llm_client.AsyncOpenAI") as MockAI:
@@ -199,6 +213,8 @@ class TestConfig:
             base_url="http://test",
             model="test-model",
             max_history_turns=-1,
+            google_api_key="",
+            google_search_engine_id="",
         )
         assert cfg.base_url == "http://test"
         assert cfg.model == "test-model"
@@ -207,55 +223,6 @@ class TestConfig:
         cfg.model = "new-model"
         assert cfg.model == "new-model"
         assert cfg.model != original_model
-
-
-class TestChatSession:
-    """Test chat session management"""
-
-    @pytest.fixture
-    def mock_session(self):
-        with patch("builtins.open"):
-            with patch(
-                "json.loads",
-                return_value={
-                    "system_prompt": "Test prompt",
-                    "history": [{"role": "user", "content": "test"}],
-                    "summary": "Test summary",
-                },
-            ):
-                return ChatSession("new-model")
-
-    def test_session_properties(self, mock_session):
-        """Test session property access"""
-        assert mock_session.system_prompt == "Test prompt"
-        assert mock_session.summary == "Test summary"
-        assert len(mock_session.history) == 1
-        assert mock_session.history[0]["content"] == "test"
-
-    def test_session_updates(self, mock_session):
-        """Test session property updates"""
-        mock_session.system_prompt = "New prompt"
-        assert mock_session.system_prompt == "New prompt"
-
-        mock_session.summary = "New summary"
-        assert mock_session.summary == "New summary"
-
-    def test_add_to_history(self, mock_session):
-        """Test adding messages to history"""
-        original_length = len(mock_session.history)
-
-        mock_session.add_to_history({"role": "assistant", "content": "response"})
-
-        assert len(mock_session.history) == original_length + 1
-        assert mock_session.history[-1]["content"] == "response"
-
-    def test_clear_session(self, mock_session):
-        """Test clearing session data"""
-        mock_session.clear()
-
-        assert mock_session.system_prompt == ""
-        assert mock_session.summary == ""
-        assert len(mock_session.history) == 0
 
 
 class TestSummarization:
@@ -270,13 +237,15 @@ class TestSummarization:
             summary_model="summary-model",
             max_history_turns=2,  # keep last 2 turns (4 messages)
             api_key=None,
+            google_api_key="",
+            google_search_engine_id="",
         )
         chat = Chat(Console(), config=cfg)
 
         # Setup history with 6 messages, limit=4 (keep last 4)
-        chat._chat_session._system_prompt = ""
-        chat._chat_session._summary = "Old summary"
-        chat._chat_session._history = [
+        chat._session_manager.current_session.system_prompt = ""
+        chat._session_manager.current_session.summary = "Old summary"
+        chat._session_manager.current_session.history = [
             {"role": "user", "content": "Msg 1"},  # Index 0
             {"role": "assistant", "content": "Reply 1"},  # Index 1
             {"role": "user", "content": "Msg 2"},  # Index 2
@@ -284,7 +253,9 @@ class TestSummarization:
             {"role": "user", "content": "Msg 3"},  # Index 4
             {"role": "assistant", "content": "Reply 3"},  # Index 5
         ]
-        chat._chat_session.last_summarized_index = -1  # Nothing summarized yet
+        chat._session_manager.current_session.last_summarized_index = (
+            -1
+        )  # Nothing summarized yet
 
         return chat
 
@@ -302,8 +273,11 @@ class TestSummarization:
             await chat._summarize()
 
             # Should summarize messages 0-1 (first 2), keeping last 4 messages
-            assert chat._chat_session.last_summarized_index == 1
-            assert chat._chat_session.summary == "New summary of messages 1-2"
+            assert chat._session_manager.current_session.last_summarized_index == 1
+            assert (
+                chat._session_manager.current_session.summary
+                == "New summary of messages 1-2"
+            )
 
             # Verify API call was made
             mock_completion.assert_called_once()
@@ -324,9 +298,11 @@ class TestSummarization:
     async def test_summarize_no_messages_to_process(self, mock_chat_with_history):
         """Test summarization when no new messages to summarize"""
         chat = mock_chat_with_history
-        chat._chat_session.last_summarized_index = 5  # Already summarized everything
+        chat._session_manager.current_session.last_summarized_index = (
+            5  # Already summarized everything
+        )
 
-        original_summary = chat._chat_session.summary
+        original_summary = chat._session_manager.current_session.summary
 
         with patch.object(
             chat._llm_client, "completion", new_callable=AsyncMock
@@ -335,7 +311,7 @@ class TestSummarization:
 
             # Should not make API call
             mock_completion.assert_not_called()
-            assert chat._chat_session.summary == original_summary
+            assert chat._session_manager.current_session.summary == original_summary
 
 
 if __name__ == "__main__":
