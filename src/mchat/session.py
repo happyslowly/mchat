@@ -32,14 +32,10 @@ class SessionMeta(BaseModel):
 
 class SessionManager:
     def __init__(self, default_model: str, continue_last_session: bool = True):
-        self._db_cache = CachingMiddleware(JSONStorage)
-        self._db = TinyDB(self._get_db_path(), storage=self._db_cache)
-        self._session_table = self._db.table("sessions")
-        self._meta_table = self._db.table("meta")
+        self._repo = SessionManagerRepo()
 
         self._model = default_model
         self._continue_last_session = continue_last_session
-
         self._session_meta = self._get_or_create_session_meta()
         self._current_session = self._get_or_create_current_session()
 
@@ -49,7 +45,7 @@ class SessionManager:
 
     def list_sessions(self) -> list[dict]:
         items: list[dict] = []
-        for session in db.select_all(self._session_table, Session):
+        for session in self._repo.get_sessions():
             items.append(
                 {
                     "id": session.id,
@@ -68,20 +64,14 @@ class SessionManager:
 
     def create_session(self) -> Session:
         session = self._new_session()
-        self._current_session.updated_at = datetime.now(timezone.utc)
-        db.update(self._session_table, self._current_session)
         self._current_session = session
         self._session_meta.latest_session_id = session.id
         return session
 
     def switch_session(self, session_id: int) -> Session:
-        session = db.select_one(
-            self._session_table, model_cls=Session, doc_id=session_id
-        )
+        session = self._repo.get_session(session_id)
         if not session:
             raise ValueError(f"Session id `{session_id}` not found")
-        self._current_session.updated_at = datetime.now(timezone.utc)
-        db.update(self._session_table, self._current_session)
         self._current_session = session
         self._session_meta.latest_session_id = session.id
         return session
@@ -89,47 +79,41 @@ class SessionManager:
     def delete_session(self, session_id: int):
         if session_id == self._current_session.id:
             raise ValueError("Cannot delete current active session")
-        db.delete_one(self._session_table, session_id)
+        self._repo.delete_session(session_id)
 
     def add_to_history(self, message: dict):
         self._current_session.history.append(message)
         self._current_session.updated_at = datetime.now(timezone.utc)
-        db.update(self._session_table, self._current_session)
+        self._repo.update_session(self._current_session)
 
     def clear_session(self):
+        self._clear_history()
         self._current_session.system_prompt = ""
-        self._current_session.history = []
-        self._current_session.summary = ""
-        self._current_session.last_summarized_index = -1
-        self._current_session.updated_at = datetime.now(timezone.utc)
-        db.update(self._session_table, self._current_session)
+        self._repo.update_session(self._current_session)
 
     def clear_history(self):
-        self._current_session.history = []
-        self._current_session.summary = ""
-        self._current_session.last_summarized_index = -1
-        self._current_session.updated_at = datetime.now(timezone.utc)
-        db.update(self._session_table, self._current_session)
+        self._clear_history()
+        self._repo.update_session(self._current_session)
 
     def set_system_prompt(self, system_prompt):
         self._current_session.system_prompt = system_prompt
         self._current_session.updated_at = datetime.now(timezone.utc)
-        db.update(self._session_table, self._current_session)
+        self._repo.update_session(self._current_session)
 
     def set_model(self, model: str):
         self._current_session.model = model
         self._current_session.updated_at = datetime.now(timezone.utc)
-        db.update(self._session_table, self._current_session)
+        self._repo.update_session(self._current_session)
 
     def flush(self) -> None:
-        db.update(self._meta_table, self._session_meta)
-        db.update(self._session_table, self._current_session)
-        db.flush(self._db)
+        self._repo.update_session(self._current_session)
+        self._repo.update_session_meta(self._session_meta)
+        self._repo.flush()
 
     def close(self) -> None:
-        db.update(self._meta_table, self._session_meta)
-        db.update(self._session_table, self._current_session)
-        db.close(self._db)
+        self._repo.update_session(self._current_session)
+        self._repo.update_session_meta(self._session_meta)
+        self._repo.close()
 
     async def generate_title(self, llm_client: LLMClient, summary_model: str):
         input = self._current_session.summary or "\n".join(
@@ -158,7 +142,7 @@ Title:
                 [{"role": "user", "content": prompt}],
             )
             self._current_session.updated_at = datetime.now(timezone.utc)
-            db.update(self._session_table, self._current_session)
+            self._repo.update_session(self._current_session)
         except Exception as e:
             raise RuntimeError(f"Failed to generate session title: {e}")
 
@@ -212,26 +196,29 @@ Summary:
             new_index = start_index + len(messages_to_summarize) - 1
             self._current_session.last_summarized_index = new_index
             self._current_session.updated_at = datetime.now(timezone.utc)
-            db.update(self._session_table, self._current_session)
+            self._repo.update_session(self._current_session)
         except Exception as e:
             raise RuntimeError(f"Failed to create conversation summary: {e}")
 
     def _get_or_create_session_meta(self) -> SessionMeta:
-        meta = db.select_one(self._meta_table, SessionMeta)
+        meta = self._repo.get_session_meta()
         if not meta:
-            meta = SessionMeta(id=-1)
-            meta = db.insert(self._meta_table, meta)
+            meta = self._repo.create_session_meta(SessionMeta(id=-1))
         return meta
+
+    def _clear_history(self):
+        self._current_session.history = []
+        self._current_session.summary = ""
+        self._current_session.last_summarized_index = -1
+        self._current_session.updated_at = datetime.now(timezone.utc)
 
     def _get_or_create_current_session(self) -> Session:
         if (
             self._session_meta.latest_session_id is not None
             and self._continue_last_session
         ):
-            session = db.select_one(
-                self._session_table,
-                model_cls=Session,
-                doc_id=self._session_meta.latest_session_id,
+            session = self._repo.get_session(
+                session_id=self._session_meta.latest_session_id
             )
             if not session:
                 raise ValueError(
@@ -243,17 +230,53 @@ Summary:
         return session
 
     def _new_session(self) -> Session:
-        session = Session(id=-1, model=self._model, title="Untitled")
-        session = db.insert(self._session_table, session)
+        session = self._repo.create_session(
+            Session(id=-1, model=self._model, title="Untitled")
+        )
         self._session_meta.latest_session_id = session.id
         return session
 
-    @classmethod
-    def _get_db_path(cls) -> Path:
+
+class SessionManagerRepo:
+    def __init__(self, db_name: str = "sessions.db"):
         if "XDG_DATA_HOME" in os.environ:
             data_path = Path(os.environ["XDG_DATA_HOME"])
         else:
             data_path = Path.home() / ".local" / "share"
         db_dir = data_path / "mchat"
         db_dir.mkdir(parents=True, exist_ok=True)
-        return db_dir / "sessions.db"
+
+        self._db_cache = CachingMiddleware(JSONStorage)
+        self._db = TinyDB(db_dir / db_name, storage=self._db_cache)
+        self._session_table = self._db.table("sessions")
+        self._meta_table = self._db.table("meta")
+
+    def create_session(self, session: Session) -> Session:
+        return db.insert(self._session_table, session)
+
+    def get_session(self, session_id: int) -> Session | None:
+        return db.select_one(self._session_table, model_cls=Session, doc_id=session_id)
+
+    def get_sessions(self) -> list[Session]:
+        return db.select_all(self._session_table, Session)
+
+    def update_session(self, session: Session) -> Session:
+        return db.update(self._session_table, session)
+
+    def delete_session(self, session_id: int) -> bool:
+        return db.delete_one(self._session_table, session_id)
+
+    def create_session_meta(self, meta: SessionMeta) -> SessionMeta:
+        return db.insert(self._meta_table, meta)
+
+    def get_session_meta(self) -> SessionMeta | None:
+        return db.select_one(self._meta_table, SessionMeta)
+
+    def update_session_meta(self, meta: SessionMeta) -> SessionMeta:
+        return db.update(self._meta_table, meta)
+
+    def flush(self):
+        self._db_cache.flush()
+
+    def close(self):
+        self._db.close()
