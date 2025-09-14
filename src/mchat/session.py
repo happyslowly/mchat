@@ -30,10 +30,59 @@ class SessionMeta(BaseModel):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-class SessionManager:
-    def __init__(self, default_model: str, continue_last_session: bool = True):
-        self._repo = SessionManagerRepo()
+class SessionManagerRepo:
+    def __init__(self, db_name: str = "sessions.db"):
+        if "XDG_DATA_HOME" in os.environ:
+            data_path = Path(os.environ["XDG_DATA_HOME"])
+        else:
+            data_path = Path.home() / ".local" / "share"
+        db_dir = data_path / "mchat"
+        db_dir.mkdir(parents=True, exist_ok=True)
 
+        self._db_cache = CachingMiddleware(JSONStorage)
+        self._db = TinyDB(db_dir / db_name, storage=self._db_cache)
+        self._session_table = self._db.table("sessions")
+        self._meta_table = self._db.table("meta")
+
+    def create_session(self, session: Session) -> Session:
+        return db.insert(self._session_table, session)
+
+    def get_session(self, session_id: int) -> Session | None:
+        return db.select_one(self._session_table, model_cls=Session, doc_id=session_id)
+
+    def get_sessions(self) -> list[Session]:
+        return db.select_all(self._session_table, Session)
+
+    def update_session(self, session: Session) -> Session:
+        return db.update(self._session_table, session)
+
+    def delete_session(self, session_id: int) -> bool:
+        return db.delete_one(self._session_table, session_id)
+
+    def create_session_meta(self, meta: SessionMeta) -> SessionMeta:
+        return db.insert(self._meta_table, meta)
+
+    def get_session_meta(self) -> SessionMeta | None:
+        return db.select_one(self._meta_table, SessionMeta)
+
+    def update_session_meta(self, meta: SessionMeta) -> SessionMeta:
+        return db.update(self._meta_table, meta)
+
+    def flush(self):
+        self._db_cache.flush()
+
+    def close(self):
+        self._db.close()
+
+
+class SessionManager:
+    def __init__(
+        self,
+        repo: SessionManagerRepo,
+        default_model: str,
+        continue_last_session: bool = True,
+    ):
+        self._repo = repo
         self._model = default_model
         self._continue_last_session = continue_last_session
         self._session_meta = self._get_or_create_session_meta()
@@ -235,48 +284,3 @@ Summary:
         )
         self._session_meta.latest_session_id = session.id
         return session
-
-
-class SessionManagerRepo:
-    def __init__(self, db_name: str = "sessions.db"):
-        if "XDG_DATA_HOME" in os.environ:
-            data_path = Path(os.environ["XDG_DATA_HOME"])
-        else:
-            data_path = Path.home() / ".local" / "share"
-        db_dir = data_path / "mchat"
-        db_dir.mkdir(parents=True, exist_ok=True)
-
-        self._db_cache = CachingMiddleware(JSONStorage)
-        self._db = TinyDB(db_dir / db_name, storage=self._db_cache)
-        self._session_table = self._db.table("sessions")
-        self._meta_table = self._db.table("meta")
-
-    def create_session(self, session: Session) -> Session:
-        return db.insert(self._session_table, session)
-
-    def get_session(self, session_id: int) -> Session | None:
-        return db.select_one(self._session_table, model_cls=Session, doc_id=session_id)
-
-    def get_sessions(self) -> list[Session]:
-        return db.select_all(self._session_table, Session)
-
-    def update_session(self, session: Session) -> Session:
-        return db.update(self._session_table, session)
-
-    def delete_session(self, session_id: int) -> bool:
-        return db.delete_one(self._session_table, session_id)
-
-    def create_session_meta(self, meta: SessionMeta) -> SessionMeta:
-        return db.insert(self._meta_table, meta)
-
-    def get_session_meta(self) -> SessionMeta | None:
-        return db.select_one(self._meta_table, SessionMeta)
-
-    def update_session_meta(self, meta: SessionMeta) -> SessionMeta:
-        return db.update(self._meta_table, meta)
-
-    def flush(self):
-        self._db_cache.flush()
-
-    def close(self):
-        self._db.close()

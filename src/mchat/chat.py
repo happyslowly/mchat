@@ -6,7 +6,6 @@ import socket
 from datetime import date, datetime
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.styles import Style
 from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
@@ -14,37 +13,34 @@ from rich.panel import Panel
 from rich.spinner import Spinner
 from rich.text import Text
 
-from mchat.commands import CommandManager, create_completer
-from mchat.config import Config, get_config
+from mchat.commands import CommandManager
+from mchat.config import Config
 from mchat.llm_client import LLMClient
 from mchat.session import SessionManager
 from mchat.task import TaskManager
 
 
 class Chat:
-    def __init__(self, console: Console, config: Config | None = None):
-        self._config = config or get_config()
-        self._llm_client = LLMClient(
-            self._config.base_url,
-            api_key=self._config.api_key,
-            timeout=self._config.timeout,
-        )
-        self._session_manager = SessionManager(default_model=self._config.model)
-        self._task_manager = TaskManager()
+    def __init__(
+        self,
+        config: Config,
+        console: Console,
+        llm_client: LLMClient,
+        session_manager: SessionManager,
+        task_manager: TaskManager,
+        command_manager: CommandManager,
+        prompt_session: PromptSession,
+    ):
+        self._config = config
         self._console = console
+        self._llm_client = llm_client
+        self._session_manager = session_manager
+        self._task_manager = task_manager
+        self._prompt_session = prompt_session
+        self._command_manager = command_manager
 
         self._summary_task = None
         self._save_task = None
-
-        self._prompt_session = PromptSession()
-        self._command_manager = CommandManager(
-            console=self._console,
-            llm_client=self._llm_client,
-            chat_session_manager=self._session_manager,
-            prompt_session=self._prompt_session,
-            task_manager=self._task_manager,
-        )
-        self._setup_prompt_session()
 
     async def start(self):
         while True:
@@ -184,16 +180,6 @@ class Chat:
             self._llm_client,
             summary_model=self._config.summary_model or session.model,
         )
-
-    def _setup_prompt_session(self):
-        style = Style.from_dict(
-            {
-                "completion-menu.completion": "fg:default bg:default",
-                "completion-menu.completion.current": "bold",
-            }
-        )
-        self._prompt_session.completer = create_completer(self._command_manager)
-        self._prompt_session.style = style
 
     def _get_variables(self):
         now = datetime.now()

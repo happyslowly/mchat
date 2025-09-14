@@ -55,18 +55,6 @@ class CommandManager:
         self._chat_session_manager = chat_session_manager
         self._prompt_session = prompt_session
         self._task_manager = task_manager
-        self._commands = self._get_commands()
-
-    def _get_commands(self) -> dict[str, CommandInfo]:
-        commands = {}
-        for name, command_info in _command_registry.items():
-            commands[name] = CommandInfo(
-                handler=getattr(self, command_info.handler.__name__),
-                description=command_info.description,
-                usage=command_info.usage,
-                category=command_info.category,
-            )
-        return commands
 
     @command("quit", "Exit application", "/quit", "General")
     async def quit(self, *args) -> None:
@@ -78,15 +66,16 @@ class CommandManager:
     @command("help", "Show this help", "/help", "General")
     async def help(self, *args) -> Text:
         _ = args
-        commands = self._get_commands()
 
         categories = {}
-        for cmd_name, cmd_info in commands.items():
+        for cmd_name, cmd_info in _command_registry.items():
             if cmd_info.category not in categories:
                 categories[cmd_info.category] = []
             categories[cmd_info.category].append((cmd_name, cmd_info))
 
-        max_usage_width = max(len(cmd_info.usage) for cmd_info in commands.values())
+        max_usage_width = max(
+            len(cmd_info.usage) for cmd_info in _command_registry.values()
+        )
 
         lines = []
         category_order: list[CommandCategory] = [
@@ -276,7 +265,7 @@ class CommandManager:
         cmd_name = parts[0]
         args = parts[1:] if len(parts) > 1 else []
 
-        if cmd_name not in self._commands:
+        if cmd_name not in _command_registry:
             self._console.print(
                 self._create_panel(f"Unknown command: /{cmd_name}", error=True)
             )
@@ -284,9 +273,9 @@ class CommandManager:
 
         output, error = None, None
         with Live(Spinner("dots"), transient=True) as _:
-            command_info = self._commands[cmd_name]
+            command_info = _command_registry[cmd_name]
             try:
-                output = await command_info.handler(*args)
+                output = await command_info.handler(self, *args)
             except Exception as e:
                 error = str(e)
         if output:
@@ -319,5 +308,5 @@ class SmartCommandCompleter(Completer):
                     yield Completion(cmd, start_position=-len(word))
 
 
-def create_completer(command: CommandManager):
-    return SmartCommandCompleter(list(command._get_commands().keys()))
+def create_completer():
+    return SmartCommandCompleter(list(_command_registry.keys()))
