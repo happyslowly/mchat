@@ -1,4 +1,5 @@
 import os
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -14,6 +15,7 @@ class Config(BaseModel):
     timeout: int = -1
     save_interval: int = 300
     continue_last_session: bool = True
+    workspace: str = tempfile.gettempdir()
 
     google_api_key: str
     google_search_engine_id: str

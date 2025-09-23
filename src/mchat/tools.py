@@ -1,6 +1,8 @@
 import asyncio
 import inspect
 import json
+import subprocess
+import sys
 from pathlib import Path
 from typing import get_type_hints
 from urllib.parse import quote
@@ -104,11 +106,35 @@ async def write_file(file_path: str, content: str, encoding: str = "utf-8") -> s
     return f"Successfully wrote {len(content)} characters to {file_path}"
 
 
+async def exec_python(file_path: str) -> str:
+    """
+    Execute a python file safely and capture output
+
+    Args:
+        file_path: python file path
+
+    Returns:
+        str: Formatted string containing return code, captured stdout and stderr
+    """
+    p = Path(file_path).resolve(strict=True)
+    if p.suffix != ".py":
+        raise ValueError("Only .py files can be executed")
+
+    proc = subprocess.run(
+        [sys.executable, str(p)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return f"Return code:{proc.returncode}\nSTDOUT:{proc.stdout}\nSTDERR:{proc.stderr}"
+
+
 _TOOLS = {
     "extract_web_page": extract_web_page,
     "web_search": web_search,
     "read_file": read_file,
     "write_file": write_file,
+    "exec_python": exec_python,
 }
 
 

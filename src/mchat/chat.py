@@ -6,6 +6,7 @@ import socket
 from datetime import date, datetime
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import ANSI
 from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
@@ -42,10 +43,17 @@ class Chat:
         self._summary_task = None
         self._save_task = None
 
+        self._default_system_prompt = (
+            "The current date is {current_timestamp}.\n"
+            f"You must confine all filesystem writing operations and code execution under workspace: {self._config.workspace}\n"
+        )
+
     async def start(self):
         while True:
             try:
-                user_input = await self._prompt_session.prompt_async("» ")
+                user_input = await self._prompt_session.prompt_async(
+                    ANSI("\x1b[32m»»»\x1b[0m ")
+                )
             except (EOFError, KeyboardInterrupt):
                 await self._command_manager.quit()
                 exit(0)
@@ -65,7 +73,9 @@ class Chat:
     def _build_messages(self, prompt: str) -> list[dict]:
         messages = []
         session = self._session_manager.current_session
-        system_prompt = session.system_prompt.format(**self._get_variables()) or ""
+        system_prompt = (self._default_system_prompt + session.system_prompt).format(
+            **self._get_variables()
+        ) or ""
         if session.summary:
             system_prompt += f"\n\nPrevious conversation summary: {session.summary}"
         if system_prompt:
@@ -113,9 +123,7 @@ class Chat:
                 )
             )
         if contents:
-            panels.append(
-                Panel(Markdown("".join(contents)), title="📝", title_align="right")
-            )
+            panels.append(Markdown("".join(contents)))
         return panels
 
     async def _chat_completion_stream(self, prompt: str):
