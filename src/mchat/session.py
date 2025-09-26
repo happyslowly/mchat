@@ -199,21 +199,12 @@ Title:
         self,
         llm_client: LLMClient,
         summary_model: str,
-        max_history_turns: int = -1,
-        end_index: int | None = None,
+        start_index: int,
+        end_index: int,
     ):
-        start_index = self._current_session.last_summarized_index + 1
-
         current_messages = self._current_session.history.copy()
 
-        if end_index is not None:
-            messages_to_summarize = current_messages[start_index:end_index]
-        else:
-            messages_to_summarize = (
-                current_messages[start_index:]
-                if max_history_turns == -1
-                else current_messages[start_index : -max_history_turns * 2]
-            )
+        messages_to_summarize = current_messages[start_index:end_index]
         if not messages_to_summarize:
             return
 
@@ -242,8 +233,7 @@ Summary:
                 summary_model,
                 [{"role": "user", "content": summary_prompt}],
             )
-            new_index = start_index + len(messages_to_summarize) - 1
-            self._current_session.last_summarized_index = new_index
+            self._current_session.last_summarized_index = end_index - 1
             self._current_session.updated_at = datetime.now(timezone.utc)
             self._repo.update_session(self._current_session)
         except Exception as e:

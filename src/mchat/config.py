@@ -11,7 +11,7 @@ class Config(BaseModel):
     api_key: str | None = None
     model: str
     summary_model: str | None = None
-    max_history_turns: int = -1
+    summary_interval_in_turns: int = 5
     timeout: int = -1
     save_interval: int = 300
     continue_last_session: bool = True

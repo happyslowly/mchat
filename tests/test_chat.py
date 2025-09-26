@@ -22,7 +22,7 @@ class TestChatMessageBuilding:
             base_url="http://test",
             model="test-model",
             summary_model="test-model",
-            max_history_turns=4,
+            summary_interval_in_turns=2,
             api_key=None,
             timeout=-1,
             save_interval=300,
@@ -32,7 +32,9 @@ class TestChatMessageBuilding:
 
         console = Console()
         llm_client = MagicMock(spec=LLMClient)
-        session_manager = SessionManager(cfg.model)
+        from mchat.session import SessionManagerRepo
+        repo = MagicMock(spec=SessionManagerRepo)
+        session_manager = SessionManager(repo=repo, default_model=cfg.model)
         task_manager = MagicMock(spec=TaskManager)
         prompt_session = MagicMock(spec=PromptSession)
         command_manager = MagicMock(spec=CommandManager)
@@ -86,10 +88,9 @@ class TestChatMessageBuilding:
 
         assert len(messages) == 4  # system(summary only) + 2 unsummarized + current
         assert messages[0]["role"] == "system"
-        assert (
-            messages[0]["content"]
-            == "\n\nPrevious conversation summary: Previous chat about coding"
-        )
+        # Should contain the default system prompt plus summary
+        assert "Previous conversation summary: Previous chat about coding" in messages[0]["content"]
+        assert "The current date is" in messages[0]["content"]
 
     def test_build_messages_no_summary(self, mock_chat):
         """Test with system prompt but no summary"""
@@ -99,7 +100,9 @@ class TestChatMessageBuilding:
 
         assert len(messages) == 4  # system + 2 unsummarized + current
         assert messages[0]["role"] == "system"
-        assert messages[0]["content"] == "You are helpful"
+        # Should contain the default system prompt plus session prompt
+        assert "You are helpful" in messages[0]["content"]
+        assert "The current date is" in messages[0]["content"]
 
     def test_build_messages_no_history(self, mock_chat):
         """Test with empty conversation history"""
@@ -223,14 +226,16 @@ class TestSummarization:
             base_url="http://test",
             model="test",
             summary_model="summary-model",
-            max_history_turns=2,  # keep last 2 turns (4 messages)
+            summary_interval_in_turns=3,  # summarize every 3 turns (6 messages)
             api_key=None,
             google_api_key="",
             google_search_engine_id="",
         )
         console = Console()
         llm_client = MagicMock(spec=LLMClient)
-        session_manager = SessionManager(cfg.model)
+        from mchat.session import SessionManagerRepo
+        repo = MagicMock(spec=SessionManagerRepo)
+        session_manager = SessionManager(repo=repo, default_model=cfg.model)
         task_manager = TaskManager()
         prompt_session = PromptSession()
         command_manager = CommandManager(
@@ -280,8 +285,8 @@ class TestSummarization:
 
         await chat._summarize()
 
-        # Should summarize messages 0-1 (first 2), keeping last 4 messages
-        assert chat._session_manager.current_session.last_summarized_index == 1
+        # Should summarize all 6 messages (with summary_interval_in_turns=3, k=6)
+        assert chat._session_manager.current_session.last_summarized_index == 5
         assert (
             chat._session_manager.current_session.summary
             == "New summary of messages 1-2"
@@ -294,13 +299,12 @@ class TestSummarization:
         expected_model = chat._config.summary_model or chat._config.model
         assert call_args[0][0] == expected_model
 
-        # Check summary prompt contains the right messages
+        # Check summary prompt contains the right messages (should include all messages)
         prompt_content = call_args[0][1][0]["content"]
         assert "Old summary" in prompt_content
         assert "Msg 1" in prompt_content
         assert "Reply 1" in prompt_content
-        # Should not contain messages that will be kept (2-5)
-        assert "Msg 3" not in prompt_content
+        assert "Msg 3" in prompt_content  # Should now include all messages
 
     @pytest.mark.asyncio
     async def test_summarize_no_messages_to_process(self, mock_chat_with_history):

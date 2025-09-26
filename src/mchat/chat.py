@@ -176,10 +176,20 @@ class Chat:
 
     async def _summarize(self):
         session = self._session_manager.current_session
+        history_len = len(self._session_manager.current_session.history)
+        last_summarized_index = (
+            self._session_manager.current_session.last_summarized_index
+        )
+        k = self._config.summary_interval_in_turns * 2
+        # enough messages to summarize?
+        if history_len - last_summarized_index - 1 < k:
+            return
+
         await self._session_manager.create_summary(
             self._llm_client,
             summary_model=self._config.summary_model or session.model,
-            max_history_turns=self._config.max_history_turns,
+            start_index=last_summarized_index + 1,
+            end_index=(history_len // k) * k,
         )
 
     async def _gen_title(self):
