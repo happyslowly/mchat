@@ -9,7 +9,7 @@ from mchat.chat import Chat
 from mchat.commands import CommandManager, create_completer
 from mchat.config import get_config
 from mchat.llm_client import LLMClient
-from mchat.session import SessionManager, SessionManagerRepo
+from mchat.session import SessionManager, SessionManagerSQLiteRepo
 from mchat.task import TaskManager
 
 
@@ -19,7 +19,7 @@ def bootstrap(console: Console) -> Chat:
         base_url=config.base_url, api_key=config.api_key, timeout=config.timeout
     )
     session_manager = SessionManager(
-        repo=SessionManagerRepo(),
+        repo=SessionManagerSQLiteRepo(),
         default_model=config.model,
         continue_last_session=config.continue_last_session,
     )

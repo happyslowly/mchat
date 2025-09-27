@@ -1,14 +1,13 @@
+import json
 import os
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Protocol
 
 from pydantic import BaseModel, Field
-from tinydb import TinyDB
-from tinydb.middlewares import CachingMiddleware
-from tinydb.storages import JSONStorage
 
 from mchat.llm_client import LLMClient
-from mchat.utils import db
 
 
 class Session(BaseModel):
@@ -30,8 +29,30 @@ class SessionMeta(BaseModel):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-class SessionManagerRepo:
-    def __init__(self, db_name: str = "sessions.db"):
+class SessionRepository(Protocol):
+    def create_session(self, session: Session) -> Session: ...
+
+    def get_session(self, session_id: int) -> Session | None: ...
+
+    def get_sessions(self) -> list[Session]: ...
+
+    def update_session(self, session: Session) -> Session: ...
+
+    def delete_session(self, session_id: int) -> bool: ...
+
+    def create_session_meta(self, meta: SessionMeta) -> SessionMeta: ...
+
+    def get_session_meta(self) -> SessionMeta | None: ...
+
+    def update_session_meta(self, meta: SessionMeta) -> SessionMeta: ...
+
+    def flush(self) -> None: ...
+
+    def close(self) -> None: ...
+
+
+class SessionManagerSQLiteRepo(SessionRepository):
+    def __init__(self, db_name: str = "sessions.sqlite3"):
         if "XDG_DATA_HOME" in os.environ:
             data_path = Path(os.environ["XDG_DATA_HOME"])
         else:
@@ -39,50 +60,200 @@ class SessionManagerRepo:
         db_dir = data_path / "mchat"
         db_dir.mkdir(parents=True, exist_ok=True)
 
-        self._db_cache = CachingMiddleware(JSONStorage)
-        self._db = TinyDB(db_dir / db_name, storage=self._db_cache)
-        self._session_table = self._db.table("sessions")
-        self._meta_table = self._db.table("meta")
+        self._conn = sqlite3.connect(db_dir / db_name, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA foreign_keys = ON")
+        self._ensure_tables()
 
     def create_session(self, session: Session) -> Session:
-        return db.insert(self._session_table, session)
+        with self._conn:
+            cursor = self._conn.execute(
+                """
+                INSERT INTO sessions (
+                    title,
+                    model,
+                    system_prompt,
+                    summary,
+                    history,
+                    last_summarized_index,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session.title,
+                    session.model,
+                    session.system_prompt,
+                    session.summary,
+                    json.dumps(session.history),
+                    session.last_summarized_index,
+                    session.created_at.isoformat(),
+                    session.updated_at.isoformat(),
+                ),
+            )
+        return session.model_copy(update={"id": cursor.lastrowid})
 
     def get_session(self, session_id: int) -> Session | None:
-        return db.select_one(self._session_table, model_cls=Session, doc_id=session_id)
+        row = self._conn.execute(
+            "SELECT * FROM sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return self._row_to_session(row)
 
     def get_sessions(self) -> list[Session]:
-        return db.select_all(self._session_table, Session)
+        rows = self._conn.execute(
+            "SELECT * FROM sessions ORDER BY updated_at DESC"
+        ).fetchall()
+        return [self._row_to_session(r) for r in rows]
 
     def update_session(self, session: Session) -> Session:
-        return db.update(self._session_table, session)
+        if session.id is None or session.id < 0:
+            raise ValueError("Session id must be set for update")
+        with self._conn:
+            self._conn.execute(
+                """
+                UPDATE sessions
+                SET
+                    title = ?,
+                    model = ?,
+                    system_prompt = ?,
+                    summary = ?,
+                    history = ?,
+                    last_summarized_index = ?,
+                    created_at = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    session.title,
+                    session.model,
+                    session.system_prompt,
+                    session.summary,
+                    json.dumps(session.history),
+                    session.last_summarized_index,
+                    session.created_at.isoformat(),
+                    session.updated_at.isoformat(),
+                    session.id,
+                ),
+            )
+        return session
 
     def delete_session(self, session_id: int) -> bool:
-        return db.delete_one(self._session_table, session_id)
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM sessions WHERE id = ?",
+                (session_id,),
+            )
+        return cursor.rowcount == 1
 
     def create_session_meta(self, meta: SessionMeta) -> SessionMeta:
-        return db.insert(self._meta_table, meta)
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO session_meta (id, latest_session_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    meta.id,
+                    meta.latest_session_id,
+                    meta.created_at.isoformat(),
+                    meta.updated_at.isoformat(),
+                ),
+            )
+        return meta
 
     def get_session_meta(self) -> SessionMeta | None:
-        return db.select_one(self._meta_table, SessionMeta)
+        row = self._conn.execute("SELECT * FROM session_meta LIMIT 1").fetchone()
+        if not row:
+            return None
+        return self._row_to_meta(row)
 
     def update_session_meta(self, meta: SessionMeta) -> SessionMeta:
-        return db.update(self._meta_table, meta)
+        with self._conn:
+            self._conn.execute(
+                """
+                UPDATE session_meta
+                SET latest_session_id = ?, created_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    meta.latest_session_id,
+                    meta.created_at.isoformat(),
+                    meta.updated_at.isoformat(),
+                    meta.id,
+                ),
+            )
+        return meta
 
     def flush(self):
-        self._db_cache.flush()
+        self._conn.commit()
 
     def close(self):
-        self._db.close()
+        self._conn.close()
+
+    def _ensure_tables(self):
+        with self._conn:
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    system_prompt TEXT NOT NULL DEFAULT '',
+                    summary TEXT NOT NULL DEFAULT '',
+                    history TEXT NOT NULL DEFAULT '[]',
+                    last_summarized_index INTEGER NOT NULL DEFAULT -1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS session_meta (
+                    id INTEGER PRIMARY KEY,
+                    latest_session_id INTEGER,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (latest_session_id) REFERENCES sessions(id) ON DELETE SET NULL
+                )
+                """
+            )
+
+    def _row_to_session(self, row: sqlite3.Row) -> Session:
+        history_json = row["history"] if row["history"] else "[]"
+        history = json.loads(history_json)
+        return Session(
+            id=row["id"],
+            title=row["title"],
+            model=row["model"],
+            system_prompt=row["system_prompt"],
+            summary=row["summary"],
+            history=history,
+            last_summarized_index=row["last_summarized_index"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    def _row_to_meta(self, row: sqlite3.Row) -> SessionMeta:
+        return SessionMeta(
+            id=row["id"],
+            latest_session_id=row["latest_session_id"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
 
 
 class SessionManager:
     def __init__(
         self,
-        repo: SessionManagerRepo,
         default_model: str,
+        repo: SessionRepository | None = None,
         continue_last_session: bool = True,
     ):
-        self._repo = repo
+        self._repo = repo or SessionManagerSQLiteRepo()
         self._model = default_model
         self._continue_last_session = continue_last_session
         self._session_meta = self._get_or_create_session_meta()

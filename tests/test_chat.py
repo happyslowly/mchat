@@ -32,8 +32,9 @@ class TestChatMessageBuilding:
 
         console = Console()
         llm_client = MagicMock(spec=LLMClient)
-        from mchat.session import SessionManagerRepo
-        repo = MagicMock(spec=SessionManagerRepo)
+        from mchat.session import SessionManagerSQLiteRepo
+
+        repo = MagicMock(spec=SessionManagerSQLiteRepo)
         session_manager = SessionManager(repo=repo, default_model=cfg.model)
         task_manager = MagicMock(spec=TaskManager)
         prompt_session = MagicMock(spec=PromptSession)
@@ -89,7 +90,10 @@ class TestChatMessageBuilding:
         assert len(messages) == 4  # system(summary only) + 2 unsummarized + current
         assert messages[0]["role"] == "system"
         # Should contain the default system prompt plus summary
-        assert "Previous conversation summary: Previous chat about coding" in messages[0]["content"]
+        assert (
+            "Previous conversation summary: Previous chat about coding"
+            in messages[0]["content"]
+        )
         assert "The current date is" in messages[0]["content"]
 
     def test_build_messages_no_summary(self, mock_chat):
@@ -203,7 +207,6 @@ class TestConfig:
         cfg = Config(
             base_url="http://test",
             model="test-model",
-            max_history_turns=-1,
             google_api_key="",
             google_search_engine_id="",
         )
@@ -233,8 +236,9 @@ class TestSummarization:
         )
         console = Console()
         llm_client = MagicMock(spec=LLMClient)
-        from mchat.session import SessionManagerRepo
-        repo = MagicMock(spec=SessionManagerRepo)
+        from mchat.session import SessionManagerSQLiteRepo
+
+        repo = MagicMock(spec=SessionManagerSQLiteRepo)
         session_manager = SessionManager(repo=repo, default_model=cfg.model)
         task_manager = TaskManager()
         prompt_session = PromptSession()
