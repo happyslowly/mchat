@@ -1,4 +1,3 @@
-import json
 import os
 import sqlite3
 from datetime import datetime, timezone
@@ -23,10 +22,12 @@ class Session(BaseModel):
 
 
 class SessionMeta(BaseModel):
-    id: int
     latest_session_id: int | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+Message = dict[str, str]
 
 
 class SessionRepository(Protocol):
@@ -46,6 +47,12 @@ class SessionRepository(Protocol):
 
     def update_session_meta(self, meta: SessionMeta) -> SessionMeta: ...
 
+    def list_session_messages(self, session_id: int) -> list[Message]: ...
+
+    def append_session_message(self, session_id: int, message: Message) -> int: ...
+
+    def delete_session_messages(self, session_id: int) -> None: ...
+
     def flush(self) -> None: ...
 
     def close(self) -> None: ...
@@ -60,7 +67,7 @@ class SessionManagerSQLiteRepo(SessionRepository):
         db_dir = data_path / "mchat"
         db_dir.mkdir(parents=True, exist_ok=True)
 
-        self._conn = sqlite3.connect(db_dir / db_name, check_same_thread=False)
+        self._conn = sqlite3.connect(db_dir / db_name)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._ensure_tables()
@@ -74,24 +81,27 @@ class SessionManagerSQLiteRepo(SessionRepository):
                     model,
                     system_prompt,
                     summary,
-                    history,
                     last_summarized_index,
                     created_at,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session.title,
                     session.model,
                     session.system_prompt,
                     session.summary,
-                    json.dumps(session.history),
                     session.last_summarized_index,
-                    session.created_at.isoformat(),
-                    session.updated_at.isoformat(),
+                    _serialize_dt(session.created_at),
+                    _serialize_dt(session.updated_at),
                 ),
             )
-        return session.model_copy(update={"id": cursor.lastrowid})
+        new_session = session.model_copy(update={"id": cursor.lastrowid, "history": []})
+        # Persist any existing in-memory history
+        for message in session.history:
+            self.append_session_message(new_session.id, message)
+            new_session.history.append(message)
+        return new_session
 
     def get_session(self, session_id: int) -> Session | None:
         row = self._conn.execute(
@@ -120,7 +130,6 @@ class SessionManagerSQLiteRepo(SessionRepository):
                     model = ?,
                     system_prompt = ?,
                     summary = ?,
-                    history = ?,
                     last_summarized_index = ?,
                     created_at = ?,
                     updated_at = ?
@@ -131,10 +140,9 @@ class SessionManagerSQLiteRepo(SessionRepository):
                     session.model,
                     session.system_prompt,
                     session.summary,
-                    json.dumps(session.history),
                     session.last_summarized_index,
-                    session.created_at.isoformat(),
-                    session.updated_at.isoformat(),
+                    _serialize_dt(session.created_at),
+                    _serialize_dt(session.updated_at),
                     session.id,
                 ),
             )
@@ -150,18 +158,33 @@ class SessionManagerSQLiteRepo(SessionRepository):
 
     def create_session_meta(self, meta: SessionMeta) -> SessionMeta:
         with self._conn:
-            self._conn.execute(
-                """
-                INSERT INTO session_meta (id, latest_session_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    meta.id,
-                    meta.latest_session_id,
-                    meta.created_at.isoformat(),
-                    meta.updated_at.isoformat(),
-                ),
-            )
+            existing = self._conn.execute(
+                "SELECT ROWID FROM session_meta LIMIT 1"
+            ).fetchone()
+            if existing:
+                self._conn.execute(
+                    """
+                    UPDATE session_meta
+                    SET latest_session_id = ?, created_at = ?, updated_at = ?
+                    """,
+                    (
+                        meta.latest_session_id,
+                        _serialize_dt(meta.created_at),
+                        _serialize_dt(meta.updated_at),
+                    ),
+                )
+            else:
+                self._conn.execute(
+                    """
+                    INSERT INTO session_meta (latest_session_id, created_at, updated_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        meta.latest_session_id,
+                        _serialize_dt(meta.created_at),
+                        _serialize_dt(meta.updated_at),
+                    ),
+                )
         return meta
 
     def get_session_meta(self) -> SessionMeta | None:
@@ -172,19 +195,29 @@ class SessionManagerSQLiteRepo(SessionRepository):
 
     def update_session_meta(self, meta: SessionMeta) -> SessionMeta:
         with self._conn:
-            self._conn.execute(
+            cursor = self._conn.execute(
                 """
                 UPDATE session_meta
                 SET latest_session_id = ?, created_at = ?, updated_at = ?
-                WHERE id = ?
                 """,
                 (
                     meta.latest_session_id,
-                    meta.created_at.isoformat(),
-                    meta.updated_at.isoformat(),
-                    meta.id,
+                    _serialize_dt(meta.created_at),
+                    _serialize_dt(meta.updated_at),
                 ),
             )
+            if cursor.rowcount == 0:
+                self._conn.execute(
+                    """
+                    INSERT INTO session_meta (latest_session_id, created_at, updated_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        meta.latest_session_id,
+                        _serialize_dt(meta.created_at),
+                        _serialize_dt(meta.updated_at),
+                    ),
+                )
         return meta
 
     def flush(self):
@@ -203,28 +236,118 @@ class SessionManagerSQLiteRepo(SessionRepository):
                     model TEXT NOT NULL,
                     system_prompt TEXT NOT NULL DEFAULT '',
                     summary TEXT NOT NULL DEFAULT '',
-                    history TEXT NOT NULL DEFAULT '[]',
                     last_summarized_index INTEGER NOT NULL DEFAULT -1,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    message_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP NOT NULL,
+                    updated_at TIMESTAMP NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS session_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER NOT NULL,
+                    position INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMP NOT NULL,
+                    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                    UNIQUE (session_id, position)
                 )
                 """
             )
             self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS session_meta (
-                    id INTEGER PRIMARY KEY,
                     latest_session_id INTEGER,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
+                    created_at TIMESTAMP NOT NULL,
+                    updated_at TIMESTAMP NOT NULL,
                     FOREIGN KEY (latest_session_id) REFERENCES sessions(id) ON DELETE SET NULL
                 )
                 """
             )
+            self._conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_session_messages_session_id
+                ON session_messages (session_id)
+                """
+            )
+
+    def list_session_messages(self, session_id: int) -> list[Message]:
+        rows = self._conn.execute(
+            """
+            SELECT role, content
+            FROM session_messages
+            WHERE session_id = ?
+            ORDER BY position
+            """,
+            (session_id,),
+        ).fetchall()
+        return [{"role": row["role"], "content": row["content"]} for row in rows]
+
+    def append_session_message(self, session_id: int, message: Message) -> int:
+        now = _serialize_dt(datetime.now(timezone.utc))
+        with self._conn:
+            row = self._conn.execute(
+                "SELECT message_count FROM sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            if not row:
+                raise ValueError(f"Session `{session_id}` not found")
+            position = row["message_count"] or 0
+            role = message.get("role", "assistant") or "assistant"
+            content = message.get("content", "") or ""
+            if not isinstance(role, str):
+                role = str(role)
+            if not isinstance(content, str):
+                content = str(content)
+            self._conn.execute(
+                """
+                INSERT INTO session_messages (
+                    session_id,
+                    position,
+                    role,
+                    content,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    position,
+                    role,
+                    content,
+                    now,
+                ),
+            )
+            self._conn.execute(
+                """
+                UPDATE sessions
+                SET message_count = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (position + 1, now, session_id),
+            )
+        return position
+
+    def delete_session_messages(self, session_id: int) -> None:
+        now = _serialize_dt(datetime.now(timezone.utc))
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM session_messages WHERE session_id = ?",
+                (session_id,),
+            )
+            self._conn.execute(
+                """
+                UPDATE sessions
+                SET message_count = 0, updated_at = ?
+                WHERE id = ?
+                """,
+                (now, session_id),
+            )
 
     def _row_to_session(self, row: sqlite3.Row) -> Session:
-        history_json = row["history"] if row["history"] else "[]"
-        history = json.loads(history_json)
+        history = self.list_session_messages(row["id"])
         return Session(
             id=row["id"],
             title=row["title"],
@@ -233,16 +356,15 @@ class SessionManagerSQLiteRepo(SessionRepository):
             summary=row["summary"],
             history=history,
             last_summarized_index=row["last_summarized_index"],
-            created_at=datetime.fromisoformat(row["created_at"]),
-            updated_at=datetime.fromisoformat(row["updated_at"]),
+            created_at=_deserialize_dt(row["created_at"]),
+            updated_at=_deserialize_dt(row["updated_at"]),
         )
 
     def _row_to_meta(self, row: sqlite3.Row) -> SessionMeta:
         return SessionMeta(
-            id=row["id"],
             latest_session_id=row["latest_session_id"],
-            created_at=datetime.fromisoformat(row["created_at"]),
-            updated_at=datetime.fromisoformat(row["updated_at"]),
+            created_at=_deserialize_dt(row["created_at"]),
+            updated_at=_deserialize_dt(row["updated_at"]),
         )
 
 
@@ -302,7 +424,19 @@ class SessionManager:
         self._repo.delete_session(session_id)
 
     def add_to_history(self, message: dict):
-        self._current_session.history.append(message)
+        position = self._repo.append_session_message(self._current_session.id, message)
+        if not isinstance(position, int):
+            position = len(self._current_session.history)
+        # Ensure in-memory history mirrors persisted order
+        if position == len(self._current_session.history):
+            self._current_session.history.append(message)
+        elif position < len(self._current_session.history):
+            self._current_session.history.insert(position, message)
+        else:
+            # In case of mismatch, reload from storage for consistency
+            self._current_session.history = self._repo.list_session_messages(
+                self._current_session.id
+            )
         self._current_session.updated_at = datetime.now(timezone.utc)
         self._repo.update_session(self._current_session)
 
@@ -413,10 +547,11 @@ Summary:
     def _get_or_create_session_meta(self) -> SessionMeta:
         meta = self._repo.get_session_meta()
         if not meta:
-            meta = self._repo.create_session_meta(SessionMeta(id=-1))
+            meta = self._repo.create_session_meta(SessionMeta())
         return meta
 
     def _clear_history(self):
+        self._repo.delete_session_messages(self._current_session.id)
         self._current_session.history = []
         self._current_session.summary = ""
         self._current_session.last_summarized_index = -1
@@ -445,3 +580,29 @@ Summary:
         )
         self._session_meta.latest_session_id = session.id
         return session
+
+
+def _serialize_dt(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    else:
+        value = value.astimezone(timezone.utc)
+    return value.isoformat()
+
+
+def _deserialize_dt(value: object) -> datetime:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, tz=timezone.utc)
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            try:
+                return datetime.fromtimestamp(float(value), tz=timezone.utc)
+            except ValueError as exc:
+                raise ValueError(f"Invalid timestamp value: {value!r}") from exc
+    raise TypeError(f"Unsupported timestamp value: {value!r}")
