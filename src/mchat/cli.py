@@ -38,6 +38,7 @@ def bootstrap(console: Console) -> Chat:
         chat_session_manager=session_manager,
         prompt_session=prompt_session,
         task_manager=task_manager,
+        config=config,
     )
 
     chat = Chat(

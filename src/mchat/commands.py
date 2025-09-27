@@ -12,6 +12,7 @@ from rich.panel import Panel
 from rich.spinner import Spinner
 from rich.text import Text
 
+from mchat.config import Config
 from mchat.llm_client import LLMClient
 from mchat.session import SessionManager
 from mchat.task import TaskManager
@@ -49,12 +50,14 @@ class CommandManager:
         chat_session_manager: SessionManager,
         prompt_session: PromptSession,
         task_manager: TaskManager,
+        config: Config,
     ):
         self._llm_client = llm_client
         self._console = console
         self._chat_session_manager = chat_session_manager
         self._prompt_session = prompt_session
         self._task_manager = task_manager
+        self._config = config
 
     @command("quit", "Exit application", "/quit", "General")
     async def quit(self, *args) -> None:
@@ -195,7 +198,10 @@ class CommandManager:
 
         await self._chat_session_manager.create_summary(
             self._llm_client,
-            self._chat_session_manager.current_session.model,
+            self._config.summary_model
+            or self._chat_session_manager.current_session.model,
+            start_index=self._chat_session_manager.current_session.last_summarized_index
+            + 1,
             end_index=len(self._chat_session_manager.current_session.history),
         )
         return self._chat_session_manager.current_session.summary

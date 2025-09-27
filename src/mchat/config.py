@@ -3,7 +3,7 @@ import tempfile
 import tomllib
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class Config(BaseModel):
@@ -16,9 +16,15 @@ class Config(BaseModel):
     save_interval: int = 300
     continue_last_session: bool = True
     workspace: str = tempfile.gettempdir()
-
     google_api_key: str
     google_search_engine_id: str
+
+    @field_validator("summary_interval_in_turns")
+    @classmethod
+    def ensure_interval_positive(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("summary_interval_in_turns must be >= 1")
+        return value
 
 
 def _load_config() -> Config:
